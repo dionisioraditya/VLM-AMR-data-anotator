@@ -8,10 +8,90 @@ class DatasetExporter:
     """Exports annotated dataset and prompt variations to standard VLM formats."""
 
     @staticmethod
+    def _normalize_frontier_payload(
+        assistant_text: str,
+        user_text: str = "",
+        boxes: List[Dict[str, Any]] = None
+    ) -> Tuple[Dict[str, Any], bool]:
+        """
+        Normalizes assistant output to the structured JSON format:
+        Positive: {"target_detected": true, "label": "...", "bounding_box": [...], "frontier_score": null}
+        Negative: {"target_detected": false, "label": null, "bounding_box": null, "frontier_score": float}
+
+        Returns:
+            Tuple of (payload_dict, is_positive)
+        """
+        a_clean = assistant_text.strip()
+        boxes = boxes or []
+
+        # 1. Check if already valid JSON structure
+        try:
+            parsed = json.loads(a_clean)
+            if isinstance(parsed, dict) and "target_detected" in parsed:
+                is_pos = bool(parsed.get("target_detected"))
+                # Ensure standard keys exist
+                payload = {
+                    "target_detected": is_pos,
+                    "label": parsed.get("label") if is_pos else None,
+                    "bounding_box": parsed.get("bounding_box") if is_pos else None,
+                    "frontier_score": parsed.get("frontier_score") if not is_pos else None,
+                }
+                return payload, is_pos
+        except Exception:
+            pass
+
+        # 2. Legacy 'null' string
+        if a_clean.lower() == "null":
+            return {
+                "target_detected": False,
+                "label": None,
+                "bounding_box": None,
+                "frontier_score": 0.85,
+            }, False
+
+        # 3. Legacy coordinate string: "[ymin, xmin, ymax, xmax]"
+        coords = None
+        try:
+            parsed_coords = json.loads(a_clean)
+            if isinstance(parsed_coords, list) and len(parsed_coords) == 4:
+                coords = [int(v) for v in parsed_coords]
+        except Exception:
+            pass
+
+        if coords is not None:
+            # Determine label from boxes or extract from quotes in user prompt
+            lbl = "object"
+            if boxes:
+                lbl = boxes[0].get("label", "object")
+            elif "'" in user_text:
+                parts = user_text.split("'")
+                if len(parts) >= 3:
+                    lbl = parts[1]
+            elif '"' in user_text:
+                parts = user_text.split('"')
+                if len(parts) >= 3:
+                    lbl = parts[1]
+
+            return {
+                "target_detected": True,
+                "label": lbl,
+                "bounding_box": coords,
+                "frontier_score": None,
+            }, True
+
+        # Fallback default: non-detected
+        return {
+            "target_detected": False,
+            "label": None,
+            "bounding_box": None,
+            "frontier_score": 0.85,
+        }, False
+
+    @staticmethod
     def export(
         dataset_manager,
         output_dir: str,
-        format_type: str = "qwen",  # "qwen" or "sharegpt"
+        format_type: str = "qwen",  # "qwen" (frontier JSON), "qwen_legacy", or "sharegpt"
         train_ratio: float = 0.8,
         split_method: str = "image",  # "image" (grouped) or "sequential"
         copy_images: bool = True,
@@ -55,10 +135,16 @@ class DatasetExporter:
                 for b in boxes:
                     lbl = b.get("label", "object")
                     b_2d = b.get("box_2d", [0, 0, 0, 0])
+                    payload = {
+                        "target_detected": True,
+                        "label": lbl,
+                        "bounding_box": b_2d,
+                        "frontier_score": None,
+                    }
                     prompts.append({
                         "id": f"auto_{len(prompts)}",
-                        "user": f"Deteksi {lbl}.",
-                        "assistant": str(b_2d),
+                        "user": f"Cari objek '{lbl}' pada citra ini.",
+                        "assistant": json.dumps(payload, ensure_ascii=False),
                     })
 
             if not prompts:
@@ -81,14 +167,42 @@ class DatasetExporter:
                 if not u_text:
                     continue
 
-                if a_text.lower() == "null":
-                    negative_count += 1
-                else:
+                payload_dict, is_positive = DatasetExporter._normalize_frontier_payload(
+                    assistant_text=a_text,
+                    user_text=u_text,
+                    boxes=boxes
+                )
+
+                if is_positive:
                     positive_count += 1
+                else:
+                    negative_count += 1
 
                 sample_id = f"{os.path.splitext(img_name)[0]}_v{idx+1:02d}"
+                assistant_json_str = json.dumps(payload_dict, ensure_ascii=False)
 
-                if format_type == "qwen":
+                if format_type in ("qwen", "qwen_frontier"):
+                    # Standard Qwen2-VL Multimodal JSON with Semantic Grounding & Frontier Score
+                    sample = {
+                        "id": sample_id,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "image", "image": image_ref},
+                                    {"type": "text", "text": u_text},
+                                ],
+                            },
+                            {
+                                "role": "assistant",
+                                "content": [
+                                    {"type": "text", "text": assistant_json_str},
+                                ],
+                            },
+                        ],
+                    }
+                elif format_type == "qwen_legacy":
+                    # Legacy flat string format
                     sample = {
                         "id": sample_id,
                         "image": image_ref,
@@ -103,7 +217,7 @@ class DatasetExporter:
                         "image": image_ref,
                         "conversations": [
                             {"from": "human", "value": f"<image>\n{u_text}"},
-                            {"from": "gpt", "value": a_text},
+                            {"from": "gpt", "value": assistant_json_str},
                         ],
                     }
                 img_samples.append(sample)

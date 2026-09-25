@@ -100,8 +100,36 @@ class TestCoreModules(unittest.TestCase):
         with open(train_file, "r") as f:
             lines = [l.strip() for l in f if l.strip()]
         self.assertEqual(len(lines), 2)
-        self.assertTrue(any('"null"' in l for l in lines))
-        self.assertTrue(any('[620, 310, 850, 540]' in l for l in lines))
+
+        # Verify Qwen2-VL Multimodal Content Structure & Frontier Payload
+        has_positive = False
+        has_negative = False
+        for l in lines:
+            entry = json.loads(l)
+            self.assertIn("id", entry)
+            self.assertIn("messages", entry)
+
+            user_content = entry["messages"][0]["content"]
+            self.assertEqual(user_content[0]["type"], "image")
+            self.assertEqual(user_content[1]["type"], "text")
+
+            assistant_content = entry["messages"][1]["content"]
+            self.assertEqual(assistant_content[0]["type"], "text")
+
+            payload = json.loads(assistant_content[0]["text"])
+            self.assertIn("target_detected", payload)
+            if payload["target_detected"]:
+                has_positive = True
+                self.assertEqual(payload["bounding_box"], [620, 310, 850, 540])
+                self.assertIsNone(payload["frontier_score"])
+            else:
+                has_negative = True
+                self.assertIsNone(payload["bounding_box"])
+                self.assertIsNotNone(payload["frontier_score"])
+                self.assertAlmostEqual(payload["frontier_score"], 0.85)
+
+        self.assertTrue(has_positive)
+        self.assertTrue(has_negative)
 
     def test_data_leakage_prevention(self):
         # Create 4 images with multiple prompt variations each
@@ -134,18 +162,105 @@ class TestCoreModules(unittest.TestCase):
         with open(os.path.join(out_dir, "train.jsonl"), "r") as f:
             for line in f:
                 data = json.loads(line)
-                train_imgs.add(data["image"])
+                if "messages" in data and isinstance(data["messages"][0]["content"], list):
+                    train_imgs.add(data["messages"][0]["content"][0]["image"])
+                else:
+                    train_imgs.add(data["image"])
 
         val_imgs = set()
         with open(os.path.join(out_dir, "val.jsonl"), "r") as f:
             for line in f:
                 data = json.loads(line)
-                val_imgs.add(data["image"])
+                if "messages" in data and isinstance(data["messages"][0]["content"], list):
+                    val_imgs.add(data["messages"][0]["content"][0]["image"])
+                else:
+                    val_imgs.add(data["image"])
 
         # Strictly verify no intersection between train and val images (NO LEAKAGE)
         intersection = train_imgs.intersection(val_imgs)
         self.assertEqual(len(intersection), 0, f"Data leakage detected! Images in both train and val: {intersection}")
         self.assertEqual(len(train_imgs) + len(val_imgs), 4)
+
+    def test_gemini_client_backends(self):
+        # Test backend switching and default models
+        client = GeminiClient(backend=GeminiClient.BACKEND_AGY)
+        self.assertEqual(client.backend, GeminiClient.BACKEND_AGY)
+        self.assertIn(client.model, GeminiClient.AGY_MODELS)
+
+        client.set_backend(GeminiClient.BACKEND_API)
+        self.assertEqual(client.backend, GeminiClient.BACKEND_API)
+        self.assertIn(client.model, GeminiClient.API_MODELS)
+
+        client.set_backend(GeminiClient.BACKEND_AGY)
+        self.assertEqual(client.backend, GeminiClient.BACKEND_AGY)
+        self.assertIn(client.model, GeminiClient.AGY_MODELS)
+
+        agy_path = GeminiClient.find_agy_path()
+        self.assertTrue(agy_path is None or os.path.exists(agy_path))
+
+    def test_batch_worker_unannotated_filter(self):
+        os.environ["QT_QPA_PLATFORM"] = "offscreen"
+        from PySide6.QtCore import QCoreApplication
+        app = QCoreApplication.instance() or QCoreApplication([])
+
+        from ui.tab_annotate import GeminiBatchWorker
+
+        # Create 3 images
+        img_names = ["frame_01.jpg", "frame_02.jpg", "frame_03.jpg"]
+        for img in img_names:
+            p = os.path.join(self.dm.frames_dir, img)
+            with open(p, "wb") as f:
+                f.write(b"dummy")
+
+        # Pre-annotate frame_01 and frame_03
+        anno1 = self.dm.get_annotation("frame_01.jpg")
+        anno1["boxes"] = [{"label": "box_already", "box_2d": [10, 10, 50, 50]}]
+        self.dm.save_annotation("frame_01.jpg", anno1)
+
+        anno3 = self.dm.get_annotation("frame_03.jpg")
+        anno3["boxes"] = [{"label": "box_already", "box_2d": [20, 20, 60, 60]}]
+        self.dm.save_annotation("frame_03.jpg", anno3)
+
+        self.assertTrue(self.dm.is_annotated("frame_01.jpg"))
+        self.assertFalse(self.dm.is_annotated("frame_02.jpg"))
+        self.assertTrue(self.dm.is_annotated("frame_03.jpg"))
+
+        # Mock gemini client
+        detected_calls = []
+
+        class MockGeminiClient:
+            backend = GeminiClient.BACKEND_AGY
+            model = "gemini-3.8-flash-high"
+
+            def detect_objects(self, image_path, target_classes=None, custom_instructions=None):
+                detected_calls.append(os.path.basename(image_path))
+                return True, "Mock detected", [{"label": "pallet", "box_2d": [100, 100, 400, 400]}]
+
+        mock_client = MockGeminiClient()
+        worker = GeminiBatchWorker(
+            gemini_client=mock_client,
+            dataset_manager=self.dm,
+            image_names=img_names,
+            only_unannotated=True,
+            target_classes=["pallet"],
+            delay_seconds=0.0,
+        )
+
+        progress_msgs = []
+        worker.progress.connect(lambda cur, tot, img, status: progress_msgs.append((img, status)))
+        worker.run()
+
+        # Only frame_02.jpg should have been passed to detect_objects
+        self.assertEqual(detected_calls, ["frame_02.jpg"])
+
+        # frame_01 and frame_03 should have logged "Melewati"
+        skip_msgs = [status for img, status in progress_msgs if "Melewati" in status]
+        self.assertEqual(len(skip_msgs), 2)
+
+        # Now all 3 are annotated
+        self.assertTrue(self.dm.is_annotated("frame_01.jpg"))
+        self.assertTrue(self.dm.is_annotated("frame_02.jpg"))
+        self.assertTrue(self.dm.is_annotated("frame_03.jpg"))
 
 if __name__ == "__main__":
     unittest.main()

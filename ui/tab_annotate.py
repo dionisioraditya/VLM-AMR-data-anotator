@@ -31,11 +31,11 @@ class GeminiDetectionThread(QThread):
 
 
 class GeminiBatchWorker(QThread):
-    """Worker thread for batch autolabeling multiple images with Gemini and rate limit handling."""
+    """Worker thread for batch autolabeling multiple images with Antigravity CLI or Gemini API."""
     progress = Signal(int, int, str, str)  # current, total, image_name, status_message
     finished_batch = Signal(int, int, str)  # processed_count, detected_boxes, summary_message
 
-    def __init__(self, gemini_client, dataset_manager, image_names, only_unannotated, target_classes, delay_seconds=4.0):
+    def __init__(self, gemini_client, dataset_manager, image_names, only_unannotated, target_classes, delay_seconds=1.0):
         super().__init__()
         self.gemini_client = gemini_client
         self.dataset_manager = dataset_manager
@@ -58,15 +58,17 @@ class GeminiBatchWorker(QThread):
                 self.finished_batch.emit(processed, detected_boxes, "Proses batch dihentikan oleh pengguna.")
                 return
 
+            # Check if frame is already annotated (has bounding boxes)
             if self.only_unannotated and self.dataset_manager.is_annotated(img_name):
-                self.progress.emit(idx + 1, total, img_name, f"Melewati {img_name} (sudah dianotasi)")
+                self.progress.emit(idx + 1, total, img_name, f"Melewati {img_name} (sudah dianotasi 🟢)")
                 continue
 
             img_path = self.dataset_manager.get_image_path(img_name)
-            self.progress.emit(idx + 1, total, img_name, f"Mendeteksi {img_name} via Gemini...")
+            backend_label = "agy CLI" if self.gemini_client.backend == GeminiClient.BACKEND_AGY else "Gemini API"
+            self.progress.emit(idx + 1, total, img_name, f"Mendeteksi {img_name} via {backend_label}...")
 
-            # Retry loop with exponential backoff on HTTP 429 (Rate Limit)
-            max_retries = 3
+            # Retry loop with exponential backoff on HTTP 429/503 for API
+            max_retries = 3 if self.gemini_client.backend == GeminiClient.BACKEND_API else 1
             success = False
             msg = ""
             boxes = []
@@ -80,12 +82,11 @@ class GeminiBatchWorker(QThread):
                 )
                 if success:
                     break
-                elif "429" in msg or "quota" in msg.lower() or "rate" in msg.lower() or "exhausted" in msg.lower():
-                    wait_sec = 6 * (attempt + 1)
-                    self.progress.emit(idx + 1, total, img_name, f"⏳ Rate limit tercapai, jeda {wait_sec}s lalu coba lagi ({attempt+1}/{max_retries})...")
+                elif "429" in msg or "503" in msg or "quota" in msg.lower() or "rate" in msg.lower() or "demand" in msg.lower() or "exhausted" in msg.lower():
+                    wait_sec = 4 * (attempt + 1)
+                    self.progress.emit(idx + 1, total, img_name, f"⏳ Server sibuk / rate limit, jeda {wait_sec}s ({attempt+1}/{max_retries})...")
                     time.sleep(wait_sec)
                 else:
-                    # Non-retryable error
                     break
 
             if success:
@@ -100,7 +101,7 @@ class GeminiBatchWorker(QThread):
 
             self.progress.emit(idx + 1, total, img_name, status)
 
-            # Polite delay between requests to stay within 15 RPM
+            # Delay between requests
             if self.delay_seconds > 0 and idx < total - 1 and not self._is_cancelled:
                 time.sleep(self.delay_seconds)
 
@@ -112,7 +113,7 @@ class GeminiBatchWorker(QThread):
 
 
 class BatchDetectionDialog(QDialog):
-    """Dialog for running Batch Auto-Detect with progress bar, model selection, and rate limiting."""
+    """Dialog for running Batch Auto-Detect with progress bar, engine & model selection, and rate limiting."""
 
     def __init__(self, tab_annotate, parent=None):
         super().__init__(parent)
@@ -121,8 +122,8 @@ class BatchDetectionDialog(QDialog):
         self.gemini_client = tab_annotate.gemini_client
         self.worker = None
 
-        self.setWindowTitle("⚡ Batch Auto-Detect (Gemini AI)")
-        self.setFixedWidth(540)
+        self.setWindowTitle("⚡ Batch Auto-Detect Bounding Box")
+        self.setFixedWidth(560)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(20, 20, 20, 20)
@@ -135,34 +136,53 @@ class BatchDetectionDialog(QDialog):
         folder_info = QLabel(f"Folder aktif: <b>{os.path.basename(self.dataset_manager.active_frames_dir or '')}</b>")
         layout.addWidget(folder_info)
 
-        # Model Selection with quota information
+        # Engine Selection
+        engine_row = QHBoxLayout()
+        engine_lbl = QLabel("Pilih Engine AI:")
+        engine_lbl.setFixedWidth(140)
+        self.engine_combo = QComboBox()
+        self.engine_combo.addItem("Antigravity CLI (agy)", GeminiClient.BACKEND_AGY)
+        self.engine_combo.addItem("Google AI Studio (API Key)", GeminiClient.BACKEND_API)
+        curr_backend_idx = self.engine_combo.findData(self.gemini_client.backend)
+        if curr_backend_idx >= 0:
+            self.engine_combo.setCurrentIndex(curr_backend_idx)
+        self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
+        engine_row.addWidget(engine_lbl)
+        engine_row.addWidget(self.engine_combo)
+        layout.addLayout(engine_row)
+
+        # Model Selection
         model_row = QHBoxLayout()
-        model_lbl = QLabel("Pilih Model Gemini:")
+        model_lbl = QLabel("Pilih Model:")
         model_lbl.setFixedWidth(140)
         self.model_combo = QComboBox()
-        self.model_combo.addItem("gemini-2.0-flash (Rekomendasi: 1,500 req/hari)", "gemini-2.0-flash")
-        self.model_combo.addItem("gemini-1.5-flash (1,500 req/hari)", "gemini-1.5-flash")
-        self.model_combo.addItem("gemini-2.5-flash (Preview: Limit ketat 20 req/hari)", "gemini-2.5-flash")
         model_row.addWidget(model_lbl)
         model_row.addWidget(self.model_combo)
         layout.addLayout(model_row)
 
-        # Delay SpinBox to avoid 15 RPM rate limits
+        # Delay SpinBox
         delay_row = QHBoxLayout()
-        delay_lbl = QLabel("Jeda Antar Gambar:")
-        delay_lbl.setFixedWidth(140)
+        self.delay_lbl = QLabel("Jeda Antar Gambar:")
+        self.delay_lbl.setFixedWidth(140)
         self.delay_spin = QDoubleSpinBox()
-        self.delay_spin.setRange(0.5, 30.0)
-        self.delay_spin.setValue(4.0)
+        self.delay_spin.setRange(0.0, 30.0)
         self.delay_spin.setSingleStep(0.5)
-        self.delay_spin.setSuffix(" detik (Rekomendasi Free Tier 15 RPM)")
-        delay_row.addWidget(delay_lbl)
+        delay_row.addWidget(self.delay_lbl)
         delay_row.addWidget(self.delay_spin)
         layout.addLayout(delay_row)
 
+        # Only Unannotated Checkbox
         self.only_unannotated_check = QCheckBox("Hanya proses frame yang belum dianotasi (⚪)")
         self.only_unannotated_check.setChecked(True)
+        self.only_unannotated_check.setToolTip("Hanya memproses frame ⚪ (tanpa bounding box). Frame 🟢 yang sudah memiliki box akan dilewati.")
+        self.only_unannotated_check.setStyleSheet("font-weight: 600; color: #10b981;")
         layout.addWidget(self.only_unannotated_check)
+
+        # Hint / Status Note
+        self.hint_label = QLabel()
+        self.hint_label.setWordWrap(True)
+        self.hint_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        layout.addWidget(self.hint_label)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setValue(0)
@@ -188,9 +208,52 @@ class BatchDetectionDialog(QDialog):
 
         layout.addLayout(btn_row)
 
+        # Initialize Model list and Delay according to active engine
+        self._sync_engine_ui(self.gemini_client.backend)
+
+    def _on_engine_changed(self, index: int):
+        backend = self.engine_combo.currentData()
+        self._sync_engine_ui(backend)
+
+    def _sync_engine_ui(self, backend: str):
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        if backend == GeminiClient.BACKEND_AGY:
+            self.model_combo.addItem("gemini-3.8-flash-low (Sangat Cepat & Akurat - Rekomendasi)", "gemini-3.8-flash-low")
+            self.model_combo.addItem("gemini-3.6-flash-low (Ringan & Cepat)", "gemini-3.6-flash-low")
+            self.model_combo.addItem("gemini-3.8-flash-high (Penalaran Detail / Thinking)", "gemini-3.8-flash-high")
+            self.model_combo.addItem("gemini-3.6-flash-high (Penalaran Detail)", "gemini-3.6-flash-high")
+            self.model_combo.addItem("gemini-3.1-pro-high (Penalaran Kompleks)", "gemini-3.1-pro-high")
+            self.model_combo.addItem("claude-sonnet-4-6 (Claude Sonnet 4.6 Thinking)", "claude-sonnet-4-6")
+            self.model_combo.addItem("claude-opus-4-6-thinking (Claude Opus 4.6 Thinking)", "claude-opus-4-6-thinking")
+            self.model_combo.addItem("gpt-oss-120b-medium (GPT-OSS 120B Medium)", "gpt-oss-120b-medium")
+            self.delay_spin.setValue(0.5)
+            self.delay_spin.setSuffix(" detik (CLI local)")
+            self.hint_label.setText("💡 <b>Antigravity CLI:</b> Memanfaatkan sesi lokal Antigravity tanpa API Key dan tanpa batas 20 RPD Free Tier.")
+        else:
+            self.model_combo.addItem("gemini-3.6-flash (Paling Stabil & Akurat)", "gemini-3.6-flash")
+            self.model_combo.addItem("gemini-flash-lite-latest (Super Cepat & Kuota Tinggi)", "gemini-flash-lite-latest")
+            self.model_combo.addItem("gemini-3.8-flash (Model Terbaru - Limit 20/hari)", "gemini-3.8-flash")
+            self.delay_spin.setValue(4.0)
+            self.delay_spin.setSuffix(" detik (Rekomendasi Free Tier 15 RPM)")
+            self.hint_label.setText("⚠️ <b>Google AI Studio:</b> Menggunakan REST API dengan API Key. Dibatasi kuota Google AI Studio.")
+
+        # Match active model if possible
+        idx = self.model_combo.findData(self.gemini_client.model)
+        if idx >= 0:
+            self.model_combo.setCurrentIndex(idx)
+        else:
+            self.model_combo.setCurrentIndex(0)
+        self.model_combo.blockSignals(False)
+
     def _start_batch(self):
-        if not self.gemini_client.api_key:
+        backend = self.engine_combo.currentData()
+        if backend == GeminiClient.BACKEND_API and not self.gemini_client.api_key:
             QMessageBox.warning(self, "API Key Kosong", "Masukkan API Key Gemini di menu pengaturan terlebih dahulu.")
+            return
+
+        if backend == GeminiClient.BACKEND_AGY and not GeminiClient.find_agy_path():
+            QMessageBox.warning(self, "Binary Tidak Ditemukan", "Binary Antigravity CLI ('agy') tidak ditemukan di sistem.")
             return
 
         image_names = self.dataset_manager.get_image_list()
@@ -198,11 +261,35 @@ class BatchDetectionDialog(QDialog):
             QMessageBox.warning(self, "Folder Kosong", "Tidak ada gambar di folder aktif.")
             return
 
-        # Set selected model
+        # Check if all images already annotated when only_unannotated is checked
+        if self.only_unannotated_check.isChecked():
+            unannotated_count = sum(1 for img in image_names if not self.dataset_manager.is_annotated(img))
+            if unannotated_count == 0:
+                QMessageBox.information(
+                    self,
+                    "Semua Frame Sudah Teranotasi",
+                    "Semua frame dalam folder ini sudah memiliki anotasi (🟢).\n\n"
+                    "Hilangkan centang 'Hanya proses frame yang belum dianotasi' jika Anda ingin mendeteksi ulang seluruh frame.",
+                )
+                return
+
+        # Apply backend & model to gemini_client
+        self.gemini_client.set_backend(backend)
         selected_model = self.model_combo.currentData()
-        self.gemini_client.set_model(selected_model)
+        if selected_model:
+            self.gemini_client.set_model(selected_model)
+
+        # Sync tab_annotate sidebar selectors as well
+        if hasattr(self.tab_annotate, "engine_combo"):
+            self.tab_annotate.engine_combo.blockSignals(True)
+            idx_e = self.tab_annotate.engine_combo.findData(backend)
+            if idx_e >= 0:
+                self.tab_annotate.engine_combo.setCurrentIndex(idx_e)
+            self.tab_annotate._populate_model_combo(backend)
+            self.tab_annotate.engine_combo.blockSignals(False)
 
         self.start_btn.setEnabled(False)
+        self.engine_combo.setEnabled(False)
         self.model_combo.setEnabled(False)
         self.delay_spin.setEnabled(False)
         self.only_unannotated_check.setEnabled(False)
@@ -228,6 +315,7 @@ class BatchDetectionDialog(QDialog):
 
     def _on_finished(self, processed, boxes, message):
         self.start_btn.setEnabled(True)
+        self.engine_combo.setEnabled(True)
         self.model_combo.setEnabled(True)
         self.delay_spin.setEnabled(True)
         self.only_unannotated_check.setEnabled(True)
@@ -504,14 +592,35 @@ class TabAnnotate(QWidget):
         ai_layout.setContentsMargins(10, 10, 10, 10)
         ai_layout.setSpacing(8)
 
-        ai_title = QLabel("⚡ Gemini AI Auto-Grounding")
+        ai_title = QLabel("🤖 AI Auto-Grounding")
         ai_title.setStyleSheet("font-weight: 700; color: #a855f7;")
         ai_layout.addWidget(ai_title)
 
+        # Engine selector
+        engine_row = QHBoxLayout()
+        engine_lbl = QLabel("Engine:")
+        engine_lbl.setFixedWidth(55)
+        self.engine_combo = QComboBox()
+        self.engine_combo.addItem("Antigravity CLI (agy)", GeminiClient.BACKEND_AGY)
+        self.engine_combo.addItem("Google AI Studio (API)", GeminiClient.BACKEND_API)
+        curr_backend_idx = self.engine_combo.findData(self.gemini_client.backend)
+        if curr_backend_idx >= 0:
+            self.engine_combo.setCurrentIndex(curr_backend_idx)
+        self.engine_combo.currentIndexChanged.connect(self._on_engine_changed)
+        engine_row.addWidget(engine_lbl)
+        engine_row.addWidget(self.engine_combo)
+        ai_layout.addLayout(engine_row)
+
+        # Model selector
+        model_row = QHBoxLayout()
+        model_lbl = QLabel("Model:")
+        model_lbl.setFixedWidth(55)
         self.model_combo = QComboBox()
-        self.model_combo.addItems(GeminiClient.DEFAULT_MODELS)
+        self._populate_model_combo(self.gemini_client.backend)
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
-        ai_layout.addWidget(self.model_combo)
+        model_row.addWidget(model_lbl)
+        model_row.addWidget(self.model_combo)
+        ai_layout.addLayout(model_row)
 
         self.ai_detect_btn = QPushButton("✨ Auto-Detect Frame Ini")
         self.ai_detect_btn.setObjectName("aiBtn")
@@ -835,8 +944,29 @@ class TabAnnotate(QWidget):
             self.class_combo.blockSignals(False)
             self.canvas.set_current_label(self.class_combo.currentText() or "object")
 
+    def _on_engine_changed(self, index: int):
+        backend = self.engine_combo.currentData()
+        self.gemini_client.set_backend(backend)
+        self._populate_model_combo(backend)
+
+    def _populate_model_combo(self, backend: str):
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        models = GeminiClient.AGY_MODELS if backend == GeminiClient.BACKEND_AGY else GeminiClient.API_MODELS
+        for m in models:
+            self.model_combo.addItem(m, m)
+
+        idx = self.model_combo.findData(self.gemini_client.model)
+        if idx >= 0:
+            self.model_combo.setCurrentIndex(idx)
+        elif self.model_combo.count() > 0:
+            self.model_combo.setCurrentIndex(0)
+            self.gemini_client.set_model(self.model_combo.currentData())
+        self.model_combo.blockSignals(False)
+
     def _on_model_changed(self, model_name: str):
-        self.gemini_client.set_model(model_name)
+        if model_name:
+            self.gemini_client.set_model(model_name)
 
     # ---------------- AI Auto Detection ----------------
     def _run_ai_detection(self):
@@ -844,7 +974,7 @@ class TabAnnotate(QWidget):
             QMessageBox.warning(self, "Peringatan", "Pilih frame gambar terlebih dahulu.")
             return
 
-        if not self.gemini_client.api_key:
+        if self.gemini_client.backend == GeminiClient.BACKEND_API and not self.gemini_client.api_key:
             QMessageBox.warning(
                 self,
                 "API Key Belum Disetel",
@@ -852,9 +982,18 @@ class TabAnnotate(QWidget):
             )
             return
 
+        if self.gemini_client.backend == GeminiClient.BACKEND_AGY and not GeminiClient.find_agy_path():
+            QMessageBox.warning(
+                self,
+                "Binary agy Tidak Ditemukan",
+                "Binary Antigravity CLI ('agy') tidak ditemukan di sistem.",
+            )
+            return
+
         img_path = self.dataset_manager.get_image_path(self.current_image_name)
         self.ai_detect_btn.setEnabled(False)
-        self.ai_status_label.setText("Sedang mendeteksi via Gemini...")
+        backend_name = "Antigravity CLI (agy)" if self.gemini_client.backend == GeminiClient.BACKEND_AGY else "Gemini API"
+        self.ai_status_label.setText(f"Sedang mendeteksi via {backend_name}...")
 
         self.ai_thread = GeminiDetectionThread(
             gemini_client=self.gemini_client,

@@ -1,5 +1,6 @@
 import os
-from typing import List, Dict, Any
+import json
+from typing import List, Dict, Any, Callable
 from PySide6.QtCore import Qt, Signal, QRectF, QTimer
 from PySide6.QtGui import (
     QPixmap, QPainter, QPen, QBrush, QColor, QFont
@@ -8,10 +9,49 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QLineEdit, QSplitter,
     QMessageBox, QFrame, QGroupBox, QComboBox, QSlider,
-    QFileDialog, QScrollArea, QCheckBox, QSpinBox, QApplication
+    QFileDialog, QScrollArea, QCheckBox, QSpinBox, QApplication,
+    QDialog, QDoubleSpinBox, QFormLayout, QDialogButtonBox
 )
 from core.exporter import DatasetExporter
 from ui.components.canvas import get_color_for_label
+
+
+class FrontierScoreDialog(QDialog):
+    """Dialog to configure frontier score for negative / exploration prompts."""
+    def __init__(self, current_score: float = 0.85, title: str = "Pengaturan Frontier Score", parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setFixedWidth(360)
+
+        layout = QVBoxLayout(self)
+        layout.setSpacing(12)
+
+        info_lbl = QLabel(
+            "<b>Frontier Score (0.00 - 1.00)</b>:<br>"
+            "Estimasi seberapa menjanjikan koridor/arah ini untuk menemukan target "
+            "(misal 0.85 = lorong sangat mungkin mengarah ke target)."
+        )
+        info_lbl.setWordWrap(True)
+        info_lbl.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        layout.addWidget(info_lbl)
+
+        form = QFormLayout()
+        self.spin = QDoubleSpinBox()
+        self.spin.setRange(0.00, 1.00)
+        self.spin.setSingleStep(0.05)
+        self.spin.setDecimals(2)
+        self.spin.setValue(current_score)
+        form.addRow("Nilai Skor:", self.spin)
+        layout.addLayout(form)
+
+        btns = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        layout.addWidget(btns)
+
+    def get_score(self) -> float:
+        return round(float(self.spin.value()), 2)
+
 
 class PromptRowWidget(QFrame):
     """Single prompt variation editor row (User Prompt <-> Assistant Response)."""
@@ -19,8 +59,17 @@ class PromptRowWidget(QFrame):
     duplicate_requested = Signal(object)
     changed = Signal()
 
-    def __init__(self, user_prompt: str = "", assistant_response: str = "null", parent=None):
+    def __init__(
+        self,
+        user_prompt: str = "",
+        assistant_response: str = "",
+        get_active_boxes: Callable = None,
+        get_active_classes: Callable = None,
+        parent=None
+    ):
         super().__init__(parent)
+        self.get_active_boxes = get_active_boxes
+        self.get_active_classes = get_active_classes
         self.setObjectName("card")
         self._init_ui(user_prompt, assistant_response)
 
@@ -35,7 +84,7 @@ class PromptRowWidget(QFrame):
         u_lbl.setFixedWidth(110)
         u_lbl.setStyleSheet("font-weight: 600; color: #38bdf8;")
         self.user_edit = QLineEdit(user_prompt)
-        self.user_edit.setPlaceholderText("Contoh: Deteksi pallet di depan robot...")
+        self.user_edit.setPlaceholderText("Contoh: Cari objek 'dispenser' pada citra ini.")
         self.user_edit.textChanged.connect(self.changed.emit)
         u_layout.addWidget(u_lbl)
         u_layout.addWidget(self.user_edit)
@@ -47,24 +96,86 @@ class PromptRowWidget(QFrame):
         a_lbl.setFixedWidth(110)
         a_lbl.setStyleSheet("font-weight: 600; color: #10b981;")
         self.assistant_edit = QLineEdit(assistant_response)
-        self.assistant_edit.setPlaceholderText("Contoh: [620, 310, 850, 540] atau null")
+        self.assistant_edit.setPlaceholderText(
+            '{"target_detected": true, "label": "...", "bounding_box": [...]} atau {"target_detected": false, "frontier_score": 0.85}'
+        )
         self.assistant_edit.textChanged.connect(self.changed.emit)
         a_layout.addWidget(a_lbl)
         a_layout.addWidget(self.assistant_edit)
 
+        # Helper Button: Set Box
+        self.set_box_btn = QPushButton("🎯 Set Box")
+        self.set_box_btn.setToolTip("Otomatis format JSON deteksi objek target dengan bounding box frame ini")
+        self.set_box_btn.clicked.connect(self._on_set_box)
+        a_layout.addWidget(self.set_box_btn)
+
+        # Helper Button: Set Frontier
+        self.set_frontier_btn = QPushButton("🧭 Set Frontier")
+        self.set_frontier_btn.setToolTip("Otomatis format JSON negatif (frontier exploration) dengan skor koridor")
+        self.set_frontier_btn.clicked.connect(self._on_set_frontier)
+        a_layout.addWidget(self.set_frontier_btn)
+
         # Action Buttons
         dup_btn = QPushButton("📋 Duplikat")
-        dup_btn.setFixedWidth(85)
+        dup_btn.setFixedWidth(80)
         dup_btn.clicked.connect(lambda: self.duplicate_requested.emit(self))
         a_layout.addWidget(dup_btn)
 
         del_btn = QPushButton("🗑️")
         del_btn.setObjectName("dangerBtn")
-        del_btn.setFixedWidth(40)
+        del_btn.setFixedWidth(36)
         del_btn.clicked.connect(lambda: self.delete_requested.emit(self))
         a_layout.addWidget(del_btn)
 
         layout.addLayout(a_layout)
+
+    def _on_set_box(self):
+        boxes = self.get_active_boxes() if self.get_active_boxes else []
+        lbl = "object"
+        b_2d = [0, 0, 0, 0]
+        if boxes:
+            lbl = boxes[0].get("label", "object")
+            b_2d = boxes[0].get("box_2d", [0, 0, 0, 0])
+
+        payload = {
+            "target_detected": True,
+            "label": lbl,
+            "bounding_box": b_2d,
+            "frontier_score": None,
+        }
+        self.assistant_edit.setText(json.dumps(payload, ensure_ascii=False))
+
+        if not self.user_edit.text().strip():
+            self.user_edit.setText(f"Cari objek '{lbl}' pada citra ini.")
+
+    def _on_set_frontier(self):
+        current_score = 0.85
+        try:
+            p = json.loads(self.assistant_edit.text().strip())
+            if isinstance(p, dict) and p.get("frontier_score") is not None:
+                current_score = float(p.get("frontier_score"))
+        except Exception:
+            pass
+
+        dlg = FrontierScoreDialog(current_score=current_score, parent=self)
+        if dlg.exec() == QDialog.Accepted:
+            score = dlg.get_score()
+            payload = {
+                "target_detected": False,
+                "label": None,
+                "bounding_box": None,
+                "frontier_score": score,
+            }
+            self.assistant_edit.setText(json.dumps(payload, ensure_ascii=False))
+
+            # Suggest prompt if empty
+            if not self.user_edit.text().strip():
+                boxes = self.get_active_boxes() if self.get_active_boxes else []
+                present_classes = {b.get("label", "").lower() for b in boxes}
+                all_classes = self.get_active_classes() if self.get_active_classes else []
+                missing = [c for c in all_classes if c.lower() not in present_classes]
+                target_lbl = missing[0] if missing else "dispenser"
+                self.user_edit.setText(f"Apakah lorong ini mengarah ke '{target_lbl}'?")
 
     def get_data(self) -> Dict[str, str]:
         return {
@@ -270,11 +381,12 @@ class TabPrompts(QWidget):
         self.gen_from_boxes_btn.clicked.connect(self._auto_generate_from_boxes)
         quick_layout.addWidget(self.gen_from_boxes_btn)
 
-        self.gen_negative_all_btn = QPushButton("➕ Tambah Negative ('null') SEMUA")
+        self.gen_negative_all_btn = QPushButton("🧭 Tambah Frontier (Score) SEMUA")
+        self.gen_negative_all_btn.setToolTip("Tambah sampel frontier exploration dengan skor koridor untuk semua frame")
         self.gen_negative_all_btn.clicked.connect(self._add_negative_all_frames)
         quick_layout.addWidget(self.gen_negative_all_btn)
 
-        self.gen_negative_btn = QPushButton("➕ Tambah Negative ('null') Frame Ini")
+        self.gen_negative_btn = QPushButton("🧭 Tambah Frontier Frame Ini")
         self.gen_negative_btn.clicked.connect(self._add_negative_prompt)
         quick_layout.addWidget(self.gen_negative_btn)
 
@@ -375,8 +487,9 @@ class TabPrompts(QWidget):
         # Format selector
         fmt_lbl = QLabel("Format:")
         self.format_combo = QComboBox()
-        self.format_combo.addItem("Qwen2-VL", "qwen")
-        self.format_combo.addItem("ShareGPT / LLaVA", "sharegpt")
+        self.format_combo.addItem("Qwen2-VL (Grounding + Frontier JSON)", "qwen")
+        self.format_combo.addItem("ShareGPT / LLaVA (Grounding + Frontier JSON)", "sharegpt")
+        self.format_combo.addItem("Qwen2-VL (Legacy Plain Text)", "qwen_legacy")
         row1.addWidget(fmt_lbl)
         row1.addWidget(self.format_combo)
 
@@ -528,7 +641,7 @@ class TabPrompts(QWidget):
         # Populate prompt rows
         self._clear_prompt_rows()
         for p in prompts:
-            self._add_prompt_row_ui(p.get("user", ""), p.get("assistant", "null"))
+            self._add_prompt_row_ui(p.get("user", ""), p.get("assistant", ""))
 
     def _copy_boxes_to_clipboard(self):
         if not self.current_image_name:
@@ -536,18 +649,34 @@ class TabPrompts(QWidget):
         anno = self.dataset_manager.get_annotation(self.current_image_name)
         boxes = anno.get("boxes", [])
         if not boxes:
-            QApplication.clipboard().setText("null")
-            self.copy_boxes_btn.setText("✅ Disalin: null")
-        elif len(boxes) == 1:
-            box_str = str(boxes[0].get("box_2d", [0, 0, 0, 0]))
-            QApplication.clipboard().setText(box_str)
-            self.copy_boxes_btn.setText("✅ Disalin!")
+            payload = {
+                "target_detected": False,
+                "label": None,
+                "bounding_box": None,
+                "frontier_score": 0.85,
+            }
+            json_str = json.dumps(payload, ensure_ascii=False)
+            QApplication.clipboard().setText(json_str)
+            self.copy_boxes_btn.setText("✅ Disalin (Frontier)")
         else:
-            box_strs = [b.get("box_2d", [0, 0, 0, 0]) for b in boxes]
-            QApplication.clipboard().setText(str(box_strs))
-            self.copy_boxes_btn.setText("✅ Disalin!")
+            b0 = boxes[0]
+            payload = {
+                "target_detected": True,
+                "label": b0.get("label", "object"),
+                "bounding_box": b0.get("box_2d", [0, 0, 0, 0]),
+                "frontier_score": None,
+            }
+            json_str = json.dumps(payload, ensure_ascii=False)
+            QApplication.clipboard().setText(json_str)
+            self.copy_boxes_btn.setText("✅ Disalin (Box JSON)!")
 
         QTimer.singleShot(1500, lambda: self.copy_boxes_btn.setText("📋 Salin Box Target"))
+
+    def _get_current_boxes(self):
+        if not self.current_image_name:
+            return []
+        anno = self.dataset_manager.get_annotation(self.current_image_name)
+        return anno.get("boxes", [])
 
     def _clear_prompt_rows(self):
         for row in self.prompt_rows:
@@ -555,8 +684,23 @@ class TabPrompts(QWidget):
             row.deleteLater()
         self.prompt_rows.clear()
 
-    def _add_prompt_row_ui(self, user_text: str = "", assistant_text: str = "null"):
-        row = PromptRowWidget(user_text, assistant_text, self.prompt_container)
+    def _add_prompt_row_ui(self, user_text: str = "", assistant_text: str = ""):
+        if not assistant_text:
+            payload = {
+                "target_detected": False,
+                "label": None,
+                "bounding_box": None,
+                "frontier_score": 0.85,
+            }
+            assistant_text = json.dumps(payload, ensure_ascii=False)
+
+        row = PromptRowWidget(
+            user_prompt=user_text,
+            assistant_response=assistant_text,
+            get_active_boxes=self._get_current_boxes,
+            get_active_classes=lambda: self.dataset_manager.classes,
+            parent=self.prompt_container,
+        )
         row.delete_requested.connect(self._on_delete_row)
         row.duplicate_requested.connect(self._on_duplicate_row)
         row.changed.connect(self._save_current_prompts)
@@ -569,7 +713,29 @@ class TabPrompts(QWidget):
     def _add_empty_prompt_row(self):
         if not self.current_image_name:
             return
-        self._add_prompt_row_ui("", "null")
+        boxes = self._get_current_boxes()
+        if boxes:
+            lbl = boxes[0].get("label", "object")
+            b_2d = boxes[0].get("box_2d", [0, 0, 0, 0])
+            payload = {
+                "target_detected": True,
+                "label": lbl,
+                "bounding_box": b_2d,
+                "frontier_score": None,
+            }
+            u_text = f"Cari objek '{lbl}' pada citra ini."
+            a_text = json.dumps(payload, ensure_ascii=False)
+        else:
+            payload = {
+                "target_detected": False,
+                "label": None,
+                "bounding_box": None,
+                "frontier_score": 0.85,
+            }
+            u_text = "Cari objek 'dispenser' di koridor ini."
+            a_text = json.dumps(payload, ensure_ascii=False)
+
+        self._add_prompt_row_ui(u_text, a_text)
         self._save_current_prompts()
 
     def _on_delete_row(self, row_widget):
@@ -581,7 +747,7 @@ class TabPrompts(QWidget):
 
     def _on_duplicate_row(self, row_widget):
         data = row_widget.get_data()
-        self._add_prompt_row_ui(data.get("user", ""), data.get("assistant", "null"))
+        self._add_prompt_row_ui(data.get("user", ""), data.get("assistant", ""))
         self._save_current_prompts()
 
     def _save_current_prompts(self):
@@ -596,7 +762,7 @@ class TabPrompts(QWidget):
                 new_prompts.append({
                     "id": f"p_{idx+1}",
                     "user": d.get("user", ""),
-                    "assistant": d.get("assistant", "null"),
+                    "assistant": d.get("assistant", ""),
                 })
 
         anno["prompts"] = new_prompts
@@ -613,16 +779,16 @@ class TabPrompts(QWidget):
 
     # ---------------- Quick Generators ----------------
     def _auto_generate_all_frames(self):
-        """Generate prompt variations for ALL annotated frames in active folder."""
+        """Generate prompt variations for ALL annotated frames in active folder with Semantic Grounding JSON."""
         images = self.dataset_manager.get_image_list()
         if not images:
             QMessageBox.information(self, "Info", "Tidak ada gambar di folder aktif.")
             return
 
         variations_per_box = [
-            "Deteksi {label}.",
-            "Cari lokasi {label} di depan robot.",
-            "Tentukan koordinat bounding box {label}.",
+            "Cari objek '{label}' pada citra ini.",
+            "Tunjukkan lokasi '{label}' di ruangan ini.",
+            "Deteksi '{label}' di depan robot.",
         ]
 
         total_frames_processed = 0
@@ -639,14 +805,22 @@ class TabPrompts(QWidget):
 
             for b in boxes:
                 lbl = b.get("label", "object")
-                box_coords = str(b.get("box_2d", [0, 0, 0, 0]))
+                b_2d = b.get("box_2d", [0, 0, 0, 0])
+                payload = {
+                    "target_detected": True,
+                    "label": lbl,
+                    "bounding_box": b_2d,
+                    "frontier_score": None,
+                }
+                assistant_json = json.dumps(payload, ensure_ascii=False)
+
                 for template in variations_per_box:
                     u_text = template.format(label=lbl)
                     if not any(p.get("user") == u_text for p in new_prompts):
                         new_prompts.append({
                             "id": f"p_{len(new_prompts)+1}",
                             "user": u_text,
-                            "assistant": box_coords,
+                            "assistant": assistant_json,
                         })
                         total_prompts_created += 1
 
@@ -668,13 +842,41 @@ class TabPrompts(QWidget):
             self,
             "Batch Prompt Sukses! 🎉",
             f"Berhasil membuat {total_prompts_created} variasi prompt untuk {total_frames_processed} frame teranotasi!\n\n"
-            "Data prompt sekarang sudah siap diekspor ke JSONL di bawah."
+            "Format output: Semantic Grounding JSON siap latih."
         )
 
     def _add_negative_all_frames(self):
-        """Add 1 negative prompt ('null') for all annotated frames."""
+        """Add frontier exploration prompts with score for all annotated frames."""
         images = self.dataset_manager.get_image_list()
+        if not images:
+            QMessageBox.information(self, "Info", "Tidak ada gambar di folder aktif.")
+            return
+
+        dlg = FrontierScoreDialog(
+            current_score=0.85,
+            title="Frontier Score untuk Semua Frame",
+            parent=self
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        score = dlg.get_score()
         count = 0
+
+        templates = [
+            "Apakah lorong ini mengarah ke '{label}'?",
+            "Cari objek '{label}' di koridor ini.",
+            "Find the '{label}' in this image.",
+        ]
+
+        payload = {
+            "target_detected": False,
+            "label": None,
+            "bounding_box": None,
+            "frontier_score": score,
+        }
+        assistant_json = json.dumps(payload, ensure_ascii=False)
+
         for img_name in images:
             anno = self.dataset_manager.get_annotation(img_name)
             boxes = anno.get("boxes", [])
@@ -685,13 +887,13 @@ class TabPrompts(QWidget):
             missing = [c for c in self.dataset_manager.classes if c.lower() not in present_classes]
             candidate_label = missing[0] if missing else "obstacle"
 
-            u_text = f"Deteksi {candidate_label}."
+            u_text = templates[0].format(label=candidate_label)
             existing = anno.get("prompts", [])
             if not any(p.get("user") == u_text for p in existing):
                 existing.append({
                     "id": f"p_{len(existing)+1}",
                     "user": u_text,
-                    "assistant": "null",
+                    "assistant": assistant_json,
                 })
                 anno["prompts"] = existing
                 self.dataset_manager.save_annotation(img_name, anno)
@@ -700,8 +902,8 @@ class TabPrompts(QWidget):
         self.reload_data()
         QMessageBox.information(
             self,
-            "Negative Prompt Ditambahkan",
-            f"Berhasil menambahkan {count} negative prompt ('null') ke frame teranotasi."
+            "Frontier Prompt Ditambahkan",
+            f"Berhasil menambahkan {count} sampel frontier exploration (Score: {score}) ke seluruh frame teranotasi."
         )
 
     def _auto_generate_from_boxes(self):
@@ -721,34 +923,59 @@ class TabPrompts(QWidget):
             return
 
         variations_per_box = [
-            "Deteksi {label}.",
-            "Cari lokasi {label} di depan robot.",
-            "Tentukan koordinat bounding box {label}.",
+            "Cari objek '{label}' pada citra ini.",
+            "Tunjukkan lokasi '{label}' di ruangan ini.",
+            "Deteksi '{label}' di depan robot.",
         ]
 
         for b in boxes:
             lbl = b.get("label", "object")
-            box_coords = str(b.get("box_2d", [0, 0, 0, 0]))
+            b_2d = b.get("box_2d", [0, 0, 0, 0])
+            payload = {
+                "target_detected": True,
+                "label": lbl,
+                "bounding_box": b_2d,
+                "frontier_score": None,
+            }
+            assistant_json = json.dumps(payload, ensure_ascii=False)
+
             for template in variations_per_box:
                 u_text = template.format(label=lbl)
-                self._add_prompt_row_ui(u_text, box_coords)
+                self._add_prompt_row_ui(u_text, assistant_json)
 
         self._save_current_prompts()
         QMessageBox.information(self, "Sukses", f"Berhasil membuat variasi prompt dari {len(boxes)} objek pada frame ini.")
 
     def _add_negative_prompt(self):
-        """Add prompt for a class that does NOT exist in current frame with 'null' output."""
+        """Add frontier exploration prompt for a class that does NOT exist in current frame."""
         if not self.current_image_name:
             return
 
+        dlg = FrontierScoreDialog(
+            current_score=0.85,
+            title="Frontier Score Frame Ini",
+            parent=self
+        )
+        if dlg.exec() != QDialog.Accepted:
+            return
+
+        score = dlg.get_score()
         anno = self.dataset_manager.get_annotation(self.current_image_name)
         present_classes = {b.get("label", "").lower() for b in anno.get("boxes", [])}
 
         missing = [c for c in self.dataset_manager.classes if c.lower() not in present_classes]
         candidate_label = missing[0] if missing else "obstacle"
 
-        u_text = f"Deteksi {candidate_label}."
-        self._add_prompt_row_ui(u_text, "null")
+        u_text = f"Apakah lorong ini mengarah ke '{candidate_label}'?"
+        payload = {
+            "target_detected": False,
+            "label": None,
+            "bounding_box": None,
+            "frontier_score": score,
+        }
+        assistant_json = json.dumps(payload, ensure_ascii=False)
+
+        self._add_prompt_row_ui(u_text, assistant_json)
         self._save_current_prompts()
 
 

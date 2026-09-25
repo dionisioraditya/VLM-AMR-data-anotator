@@ -15,5 +15,8 @@ if ! .venv/bin/python -c "import PySide6" 2>/dev/null; then
     .venv/bin/pip install -r requirements.txt
 fi
 
+# Pastikan path shared library menyertakan ~/.local/lib untuk Qt xcb cursor
+export LD_LIBRARY_PATH="$HOME/.local/lib:$DIR/.venv/lib:$LD_LIBRARY_PATH"
+
 echo "Menjalankan AMR VLM Dataset Maker..."
-.venv/bin/python main.py "$@"
+exec .venv/bin/python main.py "$@"
