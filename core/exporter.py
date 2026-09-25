@@ -1,0 +1,189 @@
+import os
+import json
+import shutil
+import random
+from typing import Dict, Any, List, Tuple
+
+class DatasetExporter:
+    """Exports annotated dataset and prompt variations to standard VLM formats."""
+
+    @staticmethod
+    def export(
+        dataset_manager,
+        output_dir: str,
+        format_type: str = "qwen",  # "qwen" or "sharegpt"
+        train_ratio: float = 0.8,
+        split_method: str = "image",  # "image" (grouped) or "sequential"
+        copy_images: bool = True,
+        seed: int = 42,
+    ) -> Tuple[bool, str, Dict[str, Any]]:
+        """
+        Export dataset to JSONL files with strict data leakage prevention.
+
+        split_method:
+            - 'image': Splits by unique images (grouped). All prompts of an image stay in the same split.
+            - 'sequential': Splits by sequential frame order (first N% train, remaining val).
+                           Prevents temporal leakage from consecutive video frames.
+
+        Returns:
+            Tuple of (success: bool, message: str, stats: dict)
+        """
+        if not dataset_manager.project_dir:
+            return False, "Project belum dipilih.", {}
+
+        images = dataset_manager.get_image_list()
+        if not images:
+            return False, "Tidak ada gambar dalam project ini.", {}
+
+        os.makedirs(output_dir, exist_ok=True)
+        export_img_dir = os.path.join(output_dir, "images")
+        if copy_images:
+            os.makedirs(export_img_dir, exist_ok=True)
+
+        # Group samples by image to prevent prompt-level leakage
+        samples_by_image: Dict[str, List[Dict[str, Any]]] = {}
+        positive_count = 0
+        negative_count = 0
+
+        for img_name in images:
+            anno = dataset_manager.get_annotation(img_name)
+            prompts = anno.get("prompts", [])
+            boxes = anno.get("boxes", [])
+
+            # If no manual prompts exist, create default prompt entries if boxes exist
+            if not prompts and boxes:
+                for b in boxes:
+                    lbl = b.get("label", "object")
+                    b_2d = b.get("box_2d", [0, 0, 0, 0])
+                    prompts.append({
+                        "id": f"auto_{len(prompts)}",
+                        "user": f"Deteksi {lbl}.",
+                        "assistant": str(b_2d),
+                    })
+
+            if not prompts:
+                continue
+
+            # Determine image reference path in export
+            if copy_images:
+                src_path = dataset_manager.get_image_path(img_name)
+                dst_path = os.path.join(export_img_dir, img_name)
+                if os.path.isfile(src_path) and not os.path.exists(dst_path):
+                    shutil.copy2(src_path, dst_path)
+                image_ref = f"images/{img_name}"
+            else:
+                image_ref = dataset_manager.get_image_path(img_name)
+
+            img_samples = []
+            for idx, p in enumerate(prompts):
+                u_text = p.get("user", "").strip()
+                a_text = p.get("assistant", "").strip()
+                if not u_text:
+                    continue
+
+                if a_text.lower() == "null":
+                    negative_count += 1
+                else:
+                    positive_count += 1
+
+                sample_id = f"{os.path.splitext(img_name)[0]}_v{idx+1:02d}"
+
+                if format_type == "qwen":
+                    sample = {
+                        "id": sample_id,
+                        "image": image_ref,
+                        "messages": [
+                            {"role": "user", "content": f"<image>\n{u_text}"},
+                            {"role": "assistant", "content": a_text},
+                        ],
+                    }
+                else:  # sharegpt / llava format
+                    sample = {
+                        "id": sample_id,
+                        "image": image_ref,
+                        "conversations": [
+                            {"from": "human", "value": f"<image>\n{u_text}"},
+                            {"from": "gpt", "value": a_text},
+                        ],
+                    }
+                img_samples.append(sample)
+
+            if img_samples:
+                samples_by_image[img_name] = img_samples
+
+        if not samples_by_image:
+            return False, "Tidak ada data prompt yang valid untuk diekspor. Silakan buat prompt di Menu 3.", {}
+
+        # -------------------------------------------------------------
+        # Data Leakage Prevention: Split by Image or Sequential Frames
+        # -------------------------------------------------------------
+        valid_images = list(samples_by_image.keys())
+
+        if split_method == "sequential":
+            # Natural sort/order: first N% images -> train, rest -> val
+            split_idx = max(1, int(len(valid_images) * train_ratio))
+            if split_idx >= len(valid_images) and len(valid_images) > 1:
+                split_idx = len(valid_images) - 1
+            train_images = set(valid_images[:split_idx])
+            val_images = set(valid_images[split_idx:])
+        else:
+            # Grouped by image with random shuffle of images (NOT samples)
+            rng = random.Random(seed)
+            shuffled_images = list(valid_images)
+            rng.shuffle(shuffled_images)
+
+            split_idx = max(1, int(len(shuffled_images) * train_ratio))
+            if split_idx >= len(shuffled_images) and len(shuffled_images) > 1:
+                split_idx = len(shuffled_images) - 1
+            train_images = set(shuffled_images[:split_idx])
+            val_images = set(shuffled_images[split_idx:])
+
+        train_samples: List[Dict[str, Any]] = []
+        val_samples: List[Dict[str, Any]] = []
+
+        for img_name in valid_images:
+            if img_name in train_images:
+                train_samples.extend(samples_by_image[img_name])
+            else:
+                val_samples.extend(samples_by_image[img_name])
+
+        # Write out train.jsonl and val.jsonl
+        train_file = os.path.join(output_dir, "train.jsonl")
+        val_file = os.path.join(output_dir, "val.jsonl")
+
+        with open(train_file, "w", encoding="utf-8") as f:
+            for s in train_samples:
+                f.write(json.dumps(s, ensure_ascii=False) + "\n")
+
+        with open(val_file, "w", encoding="utf-8") as f:
+            for s in val_samples:
+                f.write(json.dumps(s, ensure_ascii=False) + "\n")
+
+        total_samples = len(train_samples) + len(val_samples)
+
+        # Save metadata summary
+        stats = {
+            "total_images": len(valid_images),
+            "train_images": len(train_images),
+            "val_images": len(val_images),
+            "total_samples": total_samples,
+            "train_samples": len(train_samples),
+            "val_samples": len(val_samples),
+            "positive_samples": positive_count,
+            "negative_samples_null": negative_count,
+            "format": format_type,
+            "split_method": split_method,
+            "train_ratio": train_ratio,
+        }
+
+        info_file = os.path.join(output_dir, "dataset_info.json")
+        with open(info_file, "w", encoding="utf-8") as f:
+            json.dump(stats, f, indent=2, ensure_ascii=False)
+
+        msg = (
+            f"Berhasil mengekspor {total_samples} sampel dari {len(valid_images)} gambar.\n"
+            f"• Train: {len(train_samples)} sampel ({len(train_images)} gambar)\n"
+            f"• Val: {len(val_samples)} sampel ({len(val_images)} gambar)\n"
+            f"• Metode Split: {split_method.capitalize()} (Bebas kebocoran data)"
+        )
+        return True, msg, stats
