@@ -10,7 +10,9 @@ from core.dataset_manager import DatasetManager
 from core.gemini_client import GeminiClient
 from ui.tab_video import TabVideo
 from ui.tab_annotate import TabAnnotate
+from ui.tab_split import TabSplit
 from ui.tab_prompts import TabPrompts
+from ui.tab_export import TabExport
 from ui.components.styles import DARK_THEME, LIGHT_THEME
 
 SETTINGS_FILE = os.path.expanduser("~/.amr_vlm_settings.json")
@@ -158,7 +160,7 @@ class MainWindow(QMainWindow):
 
         root_layout.addWidget(header)
 
-        # ---------------- Main Tab Widget (3 Menus) ----------------
+        # ---------------- Main Tab Widget (5 Menus) ----------------
         self.tabs = QTabWidget()
 
         # Tab 1: Video to Frames
@@ -171,9 +173,20 @@ class MainWindow(QMainWindow):
         self.tab_annotate.dataset_updated.connect(self._on_dataset_updated)
         self.tabs.addTab(self.tab_annotate, "🏷️ 2. Anotasi Objek (AI Grounding)")
 
-        # Tab 3: Prompt Variations & Exporter
+        # Tab 3: Dataset Split Partitioning (Train / Val / Test)
+        self.tab_split = TabSplit(self.dataset_manager, self)
+        self.tab_split.dataset_updated.connect(self._on_dataset_updated)
+        self.tabs.addTab(self.tab_split, "✂️ 3. Split Dataset")
+
+        # Tab 4: Prompt Variations & Template Manager (Train / Val / Test)
         self.tab_prompts = TabPrompts(self.dataset_manager, self)
-        self.tabs.addTab(self.tab_prompts, "✍️ 3. Prompt Editor & Export")
+        self.tab_prompts.dataset_updated.connect(self._on_dataset_updated)
+        self.tabs.addTab(self.tab_prompts, "💬 4. Prompt Editor")
+
+        # Tab 5: Final Dataset Exporter (train.jsonl, val.jsonl, test.jsonl)
+        self.tab_export = TabExport(self.dataset_manager, self)
+        self.tab_export.dataset_updated.connect(self._on_dataset_updated)
+        self.tabs.addTab(self.tab_export, "📦 5. Ekspor Dataset")
 
         self.tabs.currentChanged.connect(self._on_tab_changed)
 
@@ -194,7 +207,9 @@ class MainWindow(QMainWindow):
             self.proj_label.setToolTip(new_dir)
             self.tab_video.update_output_dir(self.dataset_manager.frames_dir)
             self.tab_annotate.reload_images()
+            self.tab_split.reload_data()
             self.tab_prompts.reload_data()
+            self.tab_export.reload_data()
             QMessageBox.information(self, "Project Dimuat", f"Project aktif diubah ke:\n{new_dir}")
 
     def _open_settings(self):
@@ -227,7 +242,11 @@ class MainWindow(QMainWindow):
         if index == 1:
             self.tab_annotate.reload_images()
         elif index == 2:
+            self.tab_split.reload_data()
+        elif index == 3:
             self.tab_prompts.reload_data()
+        elif index == 4:
+            self.tab_export.reload_data()
 
     def _on_frames_extracted(self, output_dir: str):
         # Auto-switch to Tab 2 and point to the extracted folder
@@ -236,6 +255,11 @@ class MainWindow(QMainWindow):
         self.tabs.setCurrentIndex(1)
 
     def _on_dataset_updated(self):
-        # If active tab is tab 3, refresh it
-        if self.tabs.currentIndex() == 2:
+        # Refresh current visible tab if needed
+        curr = self.tabs.currentIndex()
+        if curr == 2:
+            self.tab_split.reload_data()
+        elif curr == 3:
             self.tab_prompts.reload_data()
+        elif curr == 4:
+            self.tab_export.reload_data()

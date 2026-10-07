@@ -1,0 +1,136 @@
+{
+  "classes": [
+    "pallet",
+    "wooden_pallet",
+    "forklift",
+    "human",
+    "worker",
+    "charging_dock",
+    "box",
+    "cone",
+    "obstacle",
+    "amr_robot"
+  ],
+  "class_synonyms": {
+    "trash_bin": {
+      "id": [
+        "tempat sampah",
+        "tong sampah",
+        "keranjang sampah",
+        "bak sampah"
+      ],
+      "en": [
+        "trash bin",
+        "trash can",
+        "garbage can",
+        "rubbish bin",
+        "dustbin",
+        "waste basket"
+      ]
+    },
+    "door": {
+      "id": [
+        "pintu",
+        "pintu ruangan",
+        "pintu masuk",
+        "pintu keluar"
+      ],
+      "en": [
+        "door",
+        "doorway",
+        "entrance",
+        "exit door"
+      ]
+    },
+    "cardboard box": {
+      "id": [
+        "kardus",
+        "kotak kardus",
+        "dus",
+        "box"
+      ],
+      "en": [
+        "cardboard box",
+        "carton",
+        "box",
+        "package"
+      ]
+    },
+    "dispenser": {
+      "id": [
+        "dispenser",
+        "dispenser air",
+        "mesin air minum"
+      ],
+      "en": [
+        "water dispenser",
+        "water cooler",
+        "dispenser"
+      ]
+    },
+    "fire extinguisher": {
+      "id": [
+        "alat pemadam api",
+        "apar",
+        "tabung pemadam"
+      ],
+      "en": [
+        "fire extinguisher",
+        "extinguisher"
+      ]
+    },
+    "person": {
+      "id": [
+        "orang",
+        "manusia",
+        "pejalan kaki",
+        "seseorang"
+      ],
+      "en": [
+        "person",
+        "human",
+        "pedestrian",
+        "someone"
+      ]
+    },
+    "pallet": {
+      "id": [
+        "palet",
+        "palet kayu",
+        "tatakan palet"
+      ],
+      "en": [
+        "pallet",
+        "wooden pallet",
+        "skid"
+      ]
+    },
+    "chair": {
+      "id": [
+        "kursi",
+        "tempat duduk",
+        "bangku"
+      ],
+      "en": [
+        "chair",
+        "seat",
+        "stool"
+      ]
+    }
+  },
+  "generator_settings": {
+    "language": "both",
+    "use_limit": false,
+    "max_per_class": null,
+    "limit_spin_value": 10,
+    "frontier_score": 0.85,
+    "scope": "current",
+    "clear_existing": false
+  },
+  "splits": {
+    "train": [],
+    "val": [],
+    "test": []
+  },
+  "version": "1.0"
+}

@@ -1,2 +1,28 @@
-/.venv
-/amr_dataset_project
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Virtual Environment
+/.venv/
+venv/
+ENV/
+
+# Local Project Data & Outputs
+/amr_dataset_project/
+/frames/*
+!/frames/.gitkeep
+/annotations/*
+!/annotations/.gitkeep
+exports/
+*.log
+
+# Sensitive / Secrets
+.env
+*.key
+
+# IDE & OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

@@ -1,6 +1,6 @@
 import os
 import json
-from typing import List, Dict, Any, Callable
+from typing import List, Dict, Any, Callable, Optional
 from PySide6.QtCore import Qt, Signal, QRectF, QTimer
 from PySide6.QtGui import (
     QPixmap, QPainter, QPen, QBrush, QColor, QFont
@@ -10,10 +10,12 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QLineEdit, QSplitter,
     QMessageBox, QFrame, QGroupBox, QComboBox, QSlider,
     QFileDialog, QScrollArea, QCheckBox, QSpinBox, QApplication,
-    QDialog, QDoubleSpinBox, QFormLayout, QDialogButtonBox
+    QDialog, QDoubleSpinBox, QFormLayout, QDialogButtonBox, QRadioButton
 )
 from core.exporter import DatasetExporter
+from core.prompt_generator import TemplatePromptGenerator
 from ui.components.canvas import get_color_for_label
+from ui.components.template_manager_dialog import TemplateManagerDialog
 
 
 class FrontierScoreDialog(QDialog):
@@ -51,6 +53,197 @@ class FrontierScoreDialog(QDialog):
 
     def get_score(self) -> float:
         return round(float(self.spin.value()), 2)
+
+
+class FastPromptGeneratorDialog(QDialog):
+    """Dialog for fast template-based prompt generation for positive & negative grounding."""
+
+    def __init__(
+        self,
+        dataset_manager,
+        current_image_name: str,
+        initial_settings: Optional[Dict[str, Any]] = None,
+        parent=None
+    ):
+        super().__init__(parent)
+        self.dataset_manager = dataset_manager
+        self.current_image_name = current_image_name
+        self.initial_settings = initial_settings or {}
+
+        self.setWindowTitle("⚡ Fast Prompt Generator (Template-Based)")
+        self.setFixedWidth(520)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(20, 20, 20, 20)
+        layout.setSpacing(14)
+
+        title = QLabel("⚡ Fast Prompt Generator (Template-Based)")
+        title.setObjectName("titleLabel")
+        layout.addWidget(title)
+
+        desc = QLabel(
+            "Otomatis membuat prompt dari template terisolasi:<br>"
+            "• <b>Objek Terdeteksi</b>: Output bounding box asli + <code>frontier_score</code> (dinamis berdasarkan ukuran BBOX atau statis)<br>"
+            "• <b>Objek Tidak Ada</b>: Output eksplorasi koridor (<code>target_detected: false</code>, <code>frontier_score: X</code>)"
+        )
+        desc.setWordWrap(True)
+        desc.setStyleSheet("color: #cbd5e1; font-size: 12px; line-height: 1.4;")
+        layout.addWidget(desc)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+
+        # 1. Pilihan Bahasa
+        self.lang_combo = QComboBox()
+        self.lang_combo.addItem("🇮🇩 Bahasa Indonesia (50 template)", "id")
+        self.lang_combo.addItem("🇬🇧 English (50 template)", "en")
+        self.lang_combo.addItem("🌐 Bilingual (id + en - 100 template)", "both")
+
+        pref_lang = self.initial_settings.get("language", "both")
+        for i in range(self.lang_combo.count()):
+            if self.lang_combo.itemData(i) == pref_lang:
+                self.lang_combo.setCurrentIndex(i)
+                break
+        form.addRow("Pilihan Bahasa:", self.lang_combo)
+
+        # 2. Template Quantity
+        qty_layout = QHBoxLayout()
+        self.all_tpl_radio = QRadioButton("Semua Template")
+        self.limit_tpl_radio = QRadioButton("Acak N template per kelas:")
+        self.limit_spin = QSpinBox()
+        self.limit_spin.setRange(1, 100)
+
+        pref_use_limit = self.initial_settings.get("use_limit", False)
+        if self.initial_settings.get("max_per_class") is not None:
+            pref_use_limit = True
+
+        pref_limit_val = (
+            self.initial_settings.get("max_per_class")
+            or self.initial_settings.get("limit_spin_value")
+            or 10
+        )
+        self.limit_spin.setValue(int(pref_limit_val))
+
+        if pref_use_limit:
+            self.limit_tpl_radio.setChecked(True)
+            self.limit_spin.setEnabled(True)
+        else:
+            self.all_tpl_radio.setChecked(True)
+            self.limit_spin.setEnabled(False)
+
+        self.limit_tpl_radio.toggled.connect(self.limit_spin.setEnabled)
+
+        qty_layout.addWidget(self.all_tpl_radio)
+        qty_layout.addWidget(self.limit_tpl_radio)
+        qty_layout.addWidget(self.limit_spin)
+        form.addRow("Kuantitas Template:", qty_layout)
+
+        # 3. Frontier Score Settings (Dynamic, Static, or Null)
+        self.frontier_mode_combo = QComboBox()
+        self.frontier_mode_combo.addItem("⚡ Dinamis (Otomatis dari ukuran BBOX)", "dynamic")
+        self.frontier_mode_combo.addItem("🔒 Statis (Nilai tetap untuk semua objek)", "static")
+        self.frontier_mode_combo.addItem("🚫 Null / None (Objek Terdeteksi = null)", "null")
+
+        pref_mode = self.initial_settings.get("frontier_mode", "dynamic")
+        for i in range(self.frontier_mode_combo.count()):
+            if self.frontier_mode_combo.itemData(i) == pref_mode:
+                self.frontier_mode_combo.setCurrentIndex(i)
+                break
+        form.addRow("Mode Frontier (Objek):", self.frontier_mode_combo)
+
+        # Static Positive Score
+        self.pos_score_spin = QDoubleSpinBox()
+        self.pos_score_spin.setRange(0.00, 1.00)
+        self.pos_score_spin.setSingleStep(0.05)
+        self.pos_score_spin.setDecimals(2)
+        pref_pos_score = self.initial_settings.get("positive_frontier_score", 0.85)
+        try:
+            self.pos_score_spin.setValue(float(pref_pos_score))
+        except (ValueError, TypeError):
+            self.pos_score_spin.setValue(0.85)
+        self.pos_score_spin.setToolTip("Nilai frontier score tetap untuk seluruh objek yang terdeteksi (Mode Statis)")
+
+        self.pos_score_label = QLabel("Skor Statis (Objek Positif):")
+        form.addRow(self.pos_score_label, self.pos_score_spin)
+
+        def _on_frontier_mode_changed(idx):
+            is_static = (self.frontier_mode_combo.itemData(idx) == "static")
+            self.pos_score_spin.setEnabled(is_static)
+            self.pos_score_label.setEnabled(is_static)
+
+        self.frontier_mode_combo.currentIndexChanged.connect(_on_frontier_mode_changed)
+        _on_frontier_mode_changed(self.frontier_mode_combo.currentIndex())
+
+        # Negative Frontier Score (for exploration / non-present classes)
+        self.score_spin = QDoubleSpinBox()
+        self.score_spin.setRange(0.00, 1.00)
+        self.score_spin.setSingleStep(0.05)
+        self.score_spin.setDecimals(2)
+        pref_score = self.initial_settings.get("frontier_score", 0.85)
+        try:
+            self.score_spin.setValue(float(pref_score))
+        except (ValueError, TypeError):
+            self.score_spin.setValue(0.85)
+        self.score_spin.setToolTip("Skor koridor eksplorasi untuk kelas yang tidak terdeteksi di gambar (Negatif)")
+        form.addRow("Skor Koridor (Objek Negatif):", self.score_spin)
+
+        layout.addLayout(form)
+
+        # 4. Scope
+        scope_group = QGroupBox("Cakupan Pembuatan Prompt")
+        scope_layout = QVBoxLayout(scope_group)
+        self.scope_all_radio = QRadioButton("Seluruh Frame di Folder Aktif (Termasuk Frame Negatif Tanpa Objek)")
+        curr_text = f"Hanya Frame Ini Saja ({self.current_image_name})" if self.current_image_name else "Hanya Frame Ini Saja (Belum ada frame dipilih)"
+        self.scope_curr_radio = QRadioButton(curr_text)
+
+        pref_scope = self.initial_settings.get("scope", "current" if self.current_image_name else "all")
+        if pref_scope == "current" and self.current_image_name:
+            self.scope_curr_radio.setChecked(True)
+        else:
+            self.scope_all_radio.setChecked(True)
+
+        if not self.current_image_name:
+            self.scope_curr_radio.setEnabled(False)
+
+        scope_layout.addWidget(self.scope_all_radio)
+        scope_layout.addWidget(self.scope_curr_radio)
+        layout.addWidget(scope_group)
+
+        # 5. Clear existing
+        self.clear_existing_check = QCheckBox("Hapus prompt lama sebelum generate (Replace)")
+        pref_clear = self.initial_settings.get("clear_existing", False)
+        self.clear_existing_check.setChecked(bool(pref_clear))
+        self.clear_existing_check.setStyleSheet("color: #f59e0b;")
+        layout.addWidget(self.clear_existing_check)
+
+        # Buttons
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+
+        self.generate_btn = QPushButton("▶ Mulai Generate")
+        self.generate_btn.setObjectName("primaryBtn")
+        self.generate_btn.clicked.connect(self.accept)
+        btn_row.addWidget(self.generate_btn)
+
+        self.cancel_btn = QPushButton("Batal")
+        self.cancel_btn.clicked.connect(self.reject)
+        btn_row.addWidget(self.cancel_btn)
+
+        layout.addLayout(btn_row)
+
+    def get_settings(self) -> Dict[str, Any]:
+        use_limit = self.limit_tpl_radio.isChecked()
+        return {
+            "language": self.lang_combo.currentData(),
+            "use_limit": use_limit,
+            "max_per_class": self.limit_spin.value() if use_limit else None,
+            "limit_spin_value": self.limit_spin.value(),
+            "frontier_mode": self.frontier_mode_combo.currentData(),
+            "positive_frontier_score": round(float(self.pos_score_spin.value()), 2),
+            "frontier_score": round(float(self.score_spin.value()), 2),
+            "scope": "all" if self.scope_all_radio.isChecked() else "current",
+            "clear_existing": self.clear_existing_check.isChecked(),
+        }
 
 
 class PromptRowWidget(QFrame):
@@ -298,12 +491,13 @@ class ImageBoundingBoxPreview(QWidget):
 
 
 class TabPrompts(QWidget):
-    """Menu 3: Prompt Template, Data Augmentation, and Dataset Exporter."""
-    dataset_exported = Signal(str)
+    """Menu 4: Segmented Prompt Editor (Train, Validation, Test) with Isolated Template Generation."""
+    dataset_updated = Signal()
 
     def __init__(self, dataset_manager, parent=None):
         super().__init__(parent)
         self.dataset_manager = dataset_manager
+        self.active_split = "train"
         self.current_image_name = ""
         self.images_list = []
         self.prompt_rows: List[PromptRowWidget] = []
@@ -313,90 +507,124 @@ class TabPrompts(QWidget):
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
         main_layout.setContentsMargins(16, 16, 16, 16)
-        main_layout.setSpacing(14)
+        main_layout.setSpacing(10)
 
-        # Header Info Card
-        header_card = QFrame()
-        header_card.setObjectName("card")
-        header_layout = QHBoxLayout(header_card)
-        header_layout.setContentsMargins(14, 10, 14, 10)
+        # 1. Top Card: Split Selector Bar (Train / Val / Test) + Manage Templates
+        split_nav_card = QFrame()
+        split_nav_card.setObjectName("panelCard")
+        split_nav_layout = QHBoxLayout(split_nav_card)
+        split_nav_layout.setContentsMargins(14, 10, 14, 10)
+        split_nav_layout.setSpacing(10)
 
-        title_layout = QVBoxLayout()
-        title = QLabel("✍️ Variasi Prompt & Ekspor Dataset VLM")
-        title.setObjectName("titleLabel")
-        subtitle = QLabel("Kustomisasi teks prompt user manual/otomatis, tambahkan variasi dan sampel 'null', lalu ekspor ke JSONL.")
-        subtitle.setObjectName("subtitleLabel")
-        title_layout.addWidget(title)
-        title_layout.addWidget(subtitle)
-        header_layout.addLayout(title_layout)
+        split_lbl = QLabel("Pilih Partisi Dataset:")
+        split_lbl.setStyleSheet("font-weight: 700; color: #38bdf8; font-size: 13px;")
+        split_nav_layout.addWidget(split_lbl)
 
-        header_layout.addStretch()
+        self.btn_split_train = QPushButton("🟢 Train Set (0 Frame)")
+        self.btn_split_train.setFixedHeight(34)
+        self.btn_split_train.clicked.connect(lambda: self._switch_split("train"))
+        split_nav_layout.addWidget(self.btn_split_train)
 
-        self.summary_badge = QLabel("0 Frame")
+        self.btn_split_val = QPushButton("🟡 Validation Set (0 Frame)")
+        self.btn_split_val.setFixedHeight(34)
+        self.btn_split_val.clicked.connect(lambda: self._switch_split("val"))
+        split_nav_layout.addWidget(self.btn_split_val)
+
+        self.btn_split_test = QPushButton("🔵 Test Set (0 Frame)")
+        self.btn_split_test.setFixedHeight(34)
+        self.btn_split_test.clicked.connect(lambda: self._switch_split("test"))
+        split_nav_layout.addWidget(self.btn_split_test)
+
+        split_nav_layout.addStretch()
+
+        self.summary_badge = QLabel("Partisi: TRAIN (0 Frame)")
         self.summary_badge.setObjectName("badgeLabel")
-        header_layout.addWidget(self.summary_badge)
+        split_nav_layout.addWidget(self.summary_badge)
 
-        main_layout.addWidget(header_card)
+        self.btn_manage_templates = QPushButton("⚙️ Kelola Template (Train)")
+        self.btn_manage_templates.setObjectName("primaryBtn")
+        self.btn_manage_templates.setFixedHeight(34)
+        self.btn_manage_templates.clicked.connect(self._open_template_manager)
+        split_nav_layout.addWidget(self.btn_manage_templates)
 
-        # Main Splitter (Left: Frame List & Context, Right: Prompt Variations Editor)
-        splitter = QSplitter(Qt.Horizontal)
+        main_layout.addWidget(split_nav_card)
 
-        # ---------------- Left Panel: Frame Selector & Object Info ----------------
-        left_panel = QFrame()
-        left_panel.setObjectName("panelCard")
-        left_layout = QVBoxLayout(left_panel)
-        left_layout.setContentsMargins(12, 12, 12, 12)
-        left_layout.setSpacing(10)
+        # 2. Middle Card: Pilih Frame (Horizontal 3-Column Card)
+        frame_card = QFrame()
+        frame_card.setObjectName("card")
+        frame_card.setFixedHeight(195)
+        frame_card_layout = QVBoxLayout(frame_card)
+        frame_card_layout.setContentsMargins(12, 8, 12, 10)
+        frame_card_layout.setSpacing(6)
 
-        left_title = QLabel("Pilih Frame:")
-        left_title.setStyleSheet("font-weight: 700; color: #38bdf8;")
-        left_layout.addWidget(left_title)
+        frame_card_title = QLabel("Pilih Frame:")
+        frame_card_title.setStyleSheet("font-weight: 700; color: #38bdf8; font-size: 13px;")
+        frame_card_layout.addWidget(frame_card_title)
 
+        cols_layout = QHBoxLayout()
+        cols_layout.setSpacing(10)
+
+        # Sub-kolom 1: Daftar Frame (Lebar)
         self.image_list_widget = QListWidget()
         self.image_list_widget.currentRowChanged.connect(self._on_image_selected)
-        left_layout.addWidget(self.image_list_widget)
+        cols_layout.addWidget(self.image_list_widget, 3)
 
-        # Object Info in selected frame
+        # Sub-kolom 2: Objek di Frame Ini
         info_box = QGroupBox("Objek di Frame Ini")
         info_layout = QVBoxLayout(info_box)
+        info_layout.setContentsMargins(8, 6, 8, 6)
+
+        info_scroll = QScrollArea()
+        info_scroll.setWidgetResizable(True)
+        info_scroll.setFrameShape(QFrame.NoFrame)
+        info_scroll.setStyleSheet("background: transparent; border: none;")
+
         self.objects_info_label = QLabel("Tidak ada objek terdeteksi.")
         self.objects_info_label.setWordWrap(True)
-        self.objects_info_label.setStyleSheet("color: #cbd5e1; font-size: 12px;")
-        info_layout.addWidget(self.objects_info_label)
-        left_layout.addWidget(info_box)
+        self.objects_info_label.setStyleSheet("color: #cbd5e1; font-size: 12px; background: transparent;")
+        self.objects_info_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        info_scroll.setWidget(self.objects_info_label)
+        info_layout.addWidget(info_scroll)
 
-        # Quick Generation Buttons
+        cols_layout.addWidget(info_box, 2)
+
+        # Sub-kolom 3: Generator Cepat
         quick_box = QGroupBox("Generator Cepat")
         quick_layout = QVBoxLayout(quick_box)
-        quick_layout.setSpacing(8)
+        quick_layout.setContentsMargins(8, 6, 8, 6)
+        quick_layout.setSpacing(6)
 
-        self.gen_all_frames_btn = QPushButton("🚀 Buat Prompt SEMUA Frame")
-        self.gen_all_frames_btn.setObjectName("primaryBtn")
-        self.gen_all_frames_btn.setFixedHeight(34)
-        self.gen_all_frames_btn.setToolTip("Generate otomatis variasi prompt untuk seluruh frame teranotasi di folder ini")
-        self.gen_all_frames_btn.clicked.connect(self._auto_generate_all_frames)
-        quick_layout.addWidget(self.gen_all_frames_btn)
+        self.generator_mode_combo = QComboBox()
+        self.generator_mode_combo.addItem("⚡ Fast Generate dari Template", "fast_template")
+        self.generator_mode_combo.addItem("🚀 Buat Prompt SEMUA Frame (3 Variasi)", "all_frames")
+        self.generator_mode_combo.addItem("⚡ Buat untuk Frame Ini Saja (3 Variasi)", "current_frame")
+        self.generator_mode_combo.addItem("🧭 Tambah Frontier (Score) SEMUA", "frontier_all")
+        self.generator_mode_combo.addItem("🧭 Tambah Frontier Frame Ini", "frontier_current")
+        quick_layout.addWidget(self.generator_mode_combo)
 
-        self.gen_from_boxes_btn = QPushButton("⚡ Buat untuk Frame Ini Saja")
-        self.gen_from_boxes_btn.clicked.connect(self._auto_generate_from_boxes)
-        quick_layout.addWidget(self.gen_from_boxes_btn)
+        self.execute_generator_btn = QPushButton("▶ Mulai Generate")
+        self.execute_generator_btn.setObjectName("primaryBtn")
+        self.execute_generator_btn.setFixedHeight(30)
+        self.execute_generator_btn.setToolTip("Jalankan mode generator prompt yang dipilih di atas")
+        self.execute_generator_btn.clicked.connect(self._on_execute_generator_clicked)
+        quick_layout.addWidget(self.execute_generator_btn)
 
-        self.gen_negative_all_btn = QPushButton("🧭 Tambah Frontier (Score) SEMUA")
-        self.gen_negative_all_btn.setToolTip("Tambah sampel frontier exploration dengan skor koridor untuk semua frame")
-        self.gen_negative_all_btn.clicked.connect(self._add_negative_all_frames)
-        quick_layout.addWidget(self.gen_negative_all_btn)
+        self.clear_all_dataset_prompts_btn = QPushButton("🗑️ Hapus SEMUA Prompt Split Ini")
+        self.clear_all_dataset_prompts_btn.setObjectName("dangerBtn")
+        self.clear_all_dataset_prompts_btn.setFixedHeight(28)
+        self.clear_all_dataset_prompts_btn.setToolTip("Hapus seluruh variasi prompt dari frame di split aktif ini")
+        self.clear_all_dataset_prompts_btn.clicked.connect(self._clear_all_dataset_prompts)
+        quick_layout.addWidget(self.clear_all_dataset_prompts_btn)
 
-        self.gen_negative_btn = QPushButton("🧭 Tambah Frontier Frame Ini")
-        self.gen_negative_btn.clicked.connect(self._add_negative_prompt)
-        quick_layout.addWidget(self.gen_negative_btn)
+        cols_layout.addWidget(quick_box, 2)
 
-        left_layout.addWidget(quick_box)
+        frame_card_layout.addLayout(cols_layout)
+        main_layout.addWidget(frame_card)
 
-        left_panel.setMinimumWidth(240)
-        left_panel.setMaximumWidth(280)
-        splitter.addWidget(left_panel)
+        # 3. Bottom Work Area: Preview Frame & Prompt Editor (Splitter 2-Kolom)
+        splitter = QSplitter(Qt.Horizontal)
 
-        # ---------------- Center Panel: Image Preview with Bounding Boxes ----------------
+        # ---------------- Panel Kiri: Image Preview with Bounding Boxes ----------------
         preview_panel = QFrame()
         preview_panel.setObjectName("panelCard")
         preview_layout = QVBoxLayout(preview_panel)
@@ -436,7 +664,7 @@ class TabPrompts(QWidget):
         preview_layout.addLayout(prev_toolbar)
         splitter.addWidget(preview_panel)
 
-        # ---------------- Right Panel: Prompt Variations Editor ----------------
+        # ---------------- Panel Kanan: Prompt Variations Editor ----------------
         right_panel = QFrame()
         right_panel.setObjectName("panelCard")
         right_layout = QVBoxLayout(right_panel)
@@ -455,6 +683,12 @@ class TabPrompts(QWidget):
         self.add_manual_btn.clicked.connect(self._add_empty_prompt_row)
         editor_header.addWidget(self.add_manual_btn)
 
+        self.clear_all_prompts_btn = QPushButton("🗑️ Hapus Semua Prompt")
+        self.clear_all_prompts_btn.setObjectName("dangerBtn")
+        self.clear_all_prompts_btn.setToolTip("Hapus semua variasi prompt pada frame ini")
+        self.clear_all_prompts_btn.clicked.connect(self._clear_all_current_prompts)
+        editor_header.addWidget(self.clear_all_prompts_btn)
+
         right_layout.addLayout(editor_header)
 
         # Scrollable area for prompt rows
@@ -472,89 +706,55 @@ class TabPrompts(QWidget):
         right_layout.addWidget(scroll)
 
         splitter.addWidget(right_panel)
-        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(0, 1)
         splitter.setStretchFactor(1, 1)
-        splitter.setStretchFactor(2, 1)
-        main_layout.addWidget(splitter)
 
-        # ---------------- Bottom Card: Export Settings & Button ----------------
-        export_box = QGroupBox("🚀 Ekspor Dataset ke Format Siap Latih (Qwen2-VL / ShareGPT)")
-        export_layout = QVBoxLayout(export_box)
-        export_layout.setSpacing(10)
+        main_layout.addWidget(splitter, 1)
 
-        row1 = QHBoxLayout()
+    # ---------------- Split Navigation & Data Loading ----------------
+    def _update_split_buttons_ui(self):
+        splits = self.dataset_manager.get_splits()
+        n_tr = len(splits.get("train", []))
+        n_va = len(splits.get("val", []))
+        n_te = len(splits.get("test", []))
 
-        # Format selector
-        fmt_lbl = QLabel("Format:")
-        self.format_combo = QComboBox()
-        self.format_combo.addItem("Qwen2-VL (Grounding + Frontier JSON)", "qwen")
-        self.format_combo.addItem("ShareGPT / LLaVA (Grounding + Frontier JSON)", "sharegpt")
-        self.format_combo.addItem("Qwen2-VL (Legacy Plain Text)", "qwen_legacy")
-        row1.addWidget(fmt_lbl)
-        row1.addWidget(self.format_combo)
+        self.btn_split_train.setText(f"🟢 Train ({n_tr} Frame)")
+        self.btn_split_val.setText(f"🟡 Validation ({n_va} Frame)")
+        self.btn_split_test.setText(f"🔵 Test ({n_te} Frame)")
 
-        # Split Method selector (Anti-Leakage)
-        method_lbl = QLabel("Metode Split:")
-        self.split_method_combo = QComboBox()
-        self.split_method_combo.addItem("Group by Image (Bebas Leakage Prompt)", "image")
-        self.split_method_combo.addItem("Sequential Video Chunk (Bebas Leakage Video)", "sequential")
-        self.split_method_combo.setToolTip(
-            "Group by Image: Memastikan semua variasi prompt dari 1 gambar masuk ke set yang sama.\n"
-            "Sequential: Membagi frame secara kronologis berurutan (mencegah frame video mirip terpecah antara Train dan Val)."
+        active = self.active_split
+        def style_btn(btn, is_active, color):
+            if is_active:
+                btn.setStyleSheet(f"background-color: {color}25; color: {color}; border: 2px solid {color}; font-weight: bold; border-radius: 6px; padding: 0 14px;")
+            else:
+                btn.setStyleSheet("border-radius: 6px; padding: 0 14px;")
+
+        style_btn(self.btn_split_train, active == "train", "#22c55e")
+        style_btn(self.btn_split_val, active in ("val", "validation"), "#f59e0b")
+        style_btn(self.btn_split_test, active == "test", "#38bdf8")
+
+        self.btn_manage_templates.setText(f"⚙️ Kelola Template ({active.capitalize()})")
+        self.summary_badge.setText(f"Partisi: {active.upper()} ({len(self.images_list)} Frame)")
+
+    def _switch_split(self, split_name: str):
+        if self.current_image_name:
+            self._save_current_prompts()
+        self.active_split = (split_name or "train").lower().strip()
+        self.current_image_name = ""
+        self.reload_data()
+
+    def _open_template_manager(self):
+        tpl_path = self.dataset_manager.get_template_path_for_split(self.active_split)
+        dlg = TemplateManagerDialog(
+            template_file_path=tpl_path,
+            split_name=self.active_split,
+            parent=self
         )
-        row1.addWidget(method_lbl)
-        row1.addWidget(self.split_method_combo)
+        dlg.exec()
 
-        # Train / Val split
-        split_lbl = QLabel("Train Ratio:")
-        self.split_slider = QSlider(Qt.Horizontal)
-        self.split_slider.setRange(50, 95)
-        self.split_slider.setValue(80)
-        self.split_value_lbl = QLabel("80% Train / 20% Val")
-        self.split_value_lbl.setFixedWidth(130)
-        self.split_slider.valueChanged.connect(
-            lambda v: self.split_value_lbl.setText(f"{v}% Train / {100 - v}% Val")
-        )
-
-        row1.addWidget(split_lbl)
-        row1.addWidget(self.split_slider)
-        row1.addWidget(self.split_value_lbl)
-
-        # Copy images checkbox
-        self.copy_images_check = QCheckBox("Salin Gambar")
-        self.copy_images_check.setChecked(True)
-        self.copy_images_check.setToolTip("Salin file gambar ke subfolder 'images' di folder tujuan export.")
-        row1.addWidget(self.copy_images_check)
-
-        export_layout.addLayout(row1)
-
-        # Output folder row
-        row2 = QHBoxLayout()
-        out_lbl = QLabel("Folder Tujuan Export:")
-        out_lbl.setFixedWidth(140)
-        self.export_dir_edit = QLineEdit()
-        self.export_dir_edit.setPlaceholderText("Pilih folder output export...")
-        self.browse_export_btn = QPushButton("Pilih Folder...")
-        self.browse_export_btn.clicked.connect(self._browse_export_dir)
-
-        self.export_btn = QPushButton("✨ Ekspor Dataset (JSONL)")
-        self.export_btn.setObjectName("successBtn")
-        self.export_btn.setFixedHeight(36)
-        self.export_btn.clicked.connect(self._run_export)
-
-        row2.addWidget(out_lbl)
-        row2.addWidget(self.export_dir_edit)
-        row2.addWidget(self.browse_export_btn)
-        row2.addWidget(self.export_btn)
-
-        export_layout.addLayout(row2)
-
-        main_layout.addWidget(export_box)
-
-    # ---------------- Data Loading & Sync ----------------
     def reload_data(self):
-        """Reload image list and refresh views."""
-        self.images_list = self.dataset_manager.get_image_list()
+        """Reload image list for active split and refresh views."""
+        self.images_list = self.dataset_manager.get_images_for_split(self.active_split)
         self.image_list_widget.blockSignals(True)
         self.image_list_widget.clear()
 
@@ -579,24 +779,21 @@ class TabPrompts(QWidget):
             self.image_list_widget.addItem(item)
 
         self.image_list_widget.blockSignals(False)
-
-        folder_name = os.path.basename(self.dataset_manager.active_frames_dir or "frames")
-        self.summary_badge.setText(f"📁 {folder_name} | {len(self.images_list)} Frame ({annotated_count} Teranotasi)")
-
-        # Set default export dir if empty
-        if not self.export_dir_edit.text() and self.dataset_manager.project_dir:
-            self.export_dir_edit.setText(os.path.join(self.dataset_manager.project_dir, "exports"))
+        self._update_split_buttons_ui()
 
         if self.image_list_widget.count() > 0:
-            # Auto-select the first annotated frame so user sees detected objects right away
-            self.image_list_widget.setCurrentRow(first_annotated_idx)
+            target_idx = first_annotated_idx
+            if self.current_image_name and self.current_image_name in self.images_list:
+                target_idx = self.images_list.index(self.current_image_name)
+            self.image_list_widget.setCurrentRow(target_idx)
         else:
             self.current_image_name = ""
             self.editor_title.setText("Daftar Variasi Prompt")
             self.preview_title.setText("🖼️ Preview Frame & Bounding Box")
             self.res_badge.setText("")
             self.image_preview_widget.set_frame("", [])
-            self.objects_info_label.setText("Tidak ada gambar dalam folder ini.")
+            self.objects_info_label.setText(f"Tidak ada frame di partisi '{self.active_split.upper()}'.<br>Atur pembagian frame pada Menu 3 (Split Dataset).")
+            self._clear_prompt_rows()
             self._clear_prompt_rows()
 
     def _on_image_selected(self, row: int):
@@ -745,16 +942,55 @@ class TabPrompts(QWidget):
             row_widget.deleteLater()
             self._save_current_prompts()
 
+    def _clear_all_current_prompts(self):
+        """Delete all prompt variations for the currently selected frame with confirmation."""
+        if not self.current_image_name:
+            return
+
+        if not self.prompt_rows:
+            QMessageBox.information(self, "Info", "Tidak ada prompt yang tersimpan pada frame ini.")
+            return
+
+        count = len(self.prompt_rows)
+        reply = QMessageBox.question(
+            self,
+            "Konfirmasi Hapus Semua Prompt",
+            f"Apakah Anda yakin ingin menghapus seluruh ({count}) variasi prompt pada frame '{self.current_image_name}'?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        self._clear_prompt_rows()
+        self._save_current_prompts()
+        self.dataset_updated.emit()
+
     def _on_duplicate_row(self, row_widget):
         data = row_widget.get_data()
         self._add_prompt_row_ui(data.get("user", ""), data.get("assistant", ""))
         self._save_current_prompts()
 
+    def _update_list_item_for_image(self, img_name: str, new_prompt_count: Optional[int] = None):
+        """Update display text and badge for a specific image item safely by matching Qt.UserRole."""
+        if not img_name:
+            return
+        for idx in range(self.image_list_widget.count()):
+            item = self.image_list_widget.item(idx)
+            if item and item.data(Qt.UserRole) == img_name:
+                anno = self.dataset_manager.get_annotation(img_name)
+                b_count = len(anno.get("boxes", []))
+                p_count = new_prompt_count if new_prompt_count is not None else len(anno.get("prompts", []))
+                icon = "🟢" if b_count > 0 else "⚪"
+                item.setText(f"{icon} [{b_count} box, {p_count} prompt] {img_name}")
+                break
+
     def _save_current_prompts(self):
         if not self.current_image_name:
             return
 
-        anno = self.dataset_manager.get_annotation(self.current_image_name)
+        target_img = self.current_image_name
+        anno = self.dataset_manager.get_annotation(target_img)
         new_prompts = []
         for idx, row in enumerate(self.prompt_rows):
             d = row.get_data()
@@ -766,23 +1002,175 @@ class TabPrompts(QWidget):
                 })
 
         anno["prompts"] = new_prompts
-        self.dataset_manager.save_annotation(self.current_image_name, anno)
+        self.dataset_manager.save_annotation(target_img, anno)
 
-        # Update row item text in list
-        curr_row = self.image_list_widget.currentRow()
-        if curr_row >= 0:
-            item = self.image_list_widget.item(curr_row)
-            b_count = len(anno.get("boxes", []))
-            p_count = len(new_prompts)
-            icon = "🟢" if b_count > 0 else "⚪"
-            item.setText(f"{icon} [{b_count} box, {p_count} prompt] {self.current_image_name}")
+        # Update row item text in list safely by image identity
+        self._update_list_item_for_image(target_img, new_prompt_count=len(new_prompts))
 
     # ---------------- Quick Generators ----------------
-    def _auto_generate_all_frames(self):
-        """Generate prompt variations for ALL annotated frames in active folder with Semantic Grounding JSON."""
-        images = self.dataset_manager.get_image_list()
+    def _on_execute_generator_clicked(self):
+        """Execute selected prompt generation mode from dropdown."""
+        mode = self.generator_mode_combo.currentData()
+        if mode == "fast_template":
+            self._open_fast_template_dialog()
+        elif mode == "all_frames":
+            self._auto_generate_all_frames()
+        elif mode == "current_frame":
+            self._auto_generate_from_boxes()
+        elif mode == "frontier_all":
+            self._add_negative_all_frames()
+        elif mode == "frontier_current":
+            self._add_negative_prompt()
+
+    def _clear_all_dataset_prompts(self):
+        """Delete all prompt variations across images in the active split with confirmation."""
+        split_label = {"train": "Train", "val": "Validation", "test": "Test"}.get(self.active_split, self.active_split)
+        images = self.images_list
         if not images:
-            QMessageBox.information(self, "Info", "Tidak ada gambar di folder aktif.")
+            QMessageBox.information(self, "Split Kosong", f"Tidak ada gambar pada split '{split_label}'.")
+            return
+
+        total_prompts = 0
+        frames_with_prompts = 0
+        for img in images:
+            anno = self.dataset_manager.get_annotation(img)
+            p_len = len(anno.get("prompts", []))
+            if p_len > 0:
+                total_prompts += p_len
+                frames_with_prompts += 1
+
+        if total_prompts == 0:
+            QMessageBox.information(self, "Info", f"Tidak ada prompt yang tersimpan pada split '{split_label}'.")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Konfirmasi Hapus Semua Prompt",
+            f"Apakah Anda yakin ingin menghapus seluruh <b>{total_prompts} prompt</b> pada <b>{frames_with_prompts} frame</b> di split '<b>{split_label}</b>'?\n\n"
+            f"Tindakan ini hanya akan mengosongkan prompt pada split {split_label}.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        for img in images:
+            anno = self.dataset_manager.get_annotation(img)
+            if anno.get("prompts"):
+                anno["prompts"] = []
+                self.dataset_manager.save_annotation(img, anno)
+
+        self.reload_data()
+        self.dataset_updated.emit()
+        QMessageBox.information(
+            self,
+            "Prompt Dibersihkan",
+            f"Berhasil menghapus seluruh {total_prompts} prompt dari {frames_with_prompts} frame di split '{split_label}'."
+        )
+
+    def _open_fast_template_dialog(self):
+        """Open Fast Prompt Generator dialog and execute template-based prompt creation for active split."""
+        split_label = {"train": "Train", "val": "Validation", "test": "Test"}.get(self.active_split, self.active_split)
+        images = self.images_list
+        if not images:
+            QMessageBox.information(
+                self,
+                f"Split {split_label} Kosong",
+                f"Tidak ada gambar pada split '{split_label}'.\nSilakan atur pembagian frame terlebih dahulu di menu '3. Split Dataset'."
+            )
+            return
+
+        initial_settings = getattr(self, "last_fast_generator_settings", None)
+        if not initial_settings:
+            initial_settings = self.dataset_manager.get_generator_settings()
+
+        dialog = FastPromptGeneratorDialog(
+            dataset_manager=self.dataset_manager,
+            current_image_name=self.current_image_name,
+            initial_settings=initial_settings,
+            parent=self
+        )
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        settings = dialog.get_settings()
+        self.last_fast_generator_settings = settings
+        self.dataset_manager.save_generator_settings(settings)
+
+        tpl_path = self.dataset_manager.get_template_path_for_split(self.active_split)
+        gen = TemplatePromptGenerator(template_file_path=tpl_path, split=self.active_split)
+        language = settings["language"]
+        max_per_class = settings["max_per_class"]
+        frontier_mode = settings.get("frontier_mode", "dynamic")
+        positive_frontier_score = settings.get("positive_frontier_score", 0.85)
+        frontier_score = settings["frontier_score"]
+        scope = settings["scope"]
+        clear_existing = settings["clear_existing"]
+        project_classes = self.dataset_manager.classes
+
+        target_images = self.images_list if scope == "all" else [self.current_image_name]
+        total_frames_processed = 0
+        total_prompts_created = 0
+
+        for img_name in target_images:
+            if not img_name:
+                continue
+            anno = self.dataset_manager.get_annotation(img_name)
+            boxes = anno.get("boxes", [])
+
+            existing = [] if clear_existing else list(anno.get("prompts", []))
+            new_prompts = gen.generate_frame_prompts(
+                boxes=boxes,
+                project_classes=project_classes,
+                language=language,
+                max_templates_per_class=max_per_class,
+                frontier_score=frontier_score,
+                existing_prompts=existing,
+                shuffle=True if max_per_class else False,
+                class_synonyms=self.dataset_manager.get_all_synonyms(),
+                frontier_mode=frontier_mode,
+                positive_frontier_score=positive_frontier_score,
+            )
+
+            anno["prompts"] = existing + new_prompts
+            self.dataset_manager.save_annotation(img_name, anno)
+            total_frames_processed += 1
+            total_prompts_created += len(new_prompts)
+
+        if total_frames_processed == 0:
+            QMessageBox.warning(
+                self,
+                "Tidak Ada Frame",
+                f"Tidak ada frame yang dapat diproses pada split '{split_label}'."
+            )
+            return
+
+        self.reload_data()
+        self.dataset_updated.emit()
+        if frontier_mode == "dynamic":
+            mode_desc = "⚡ Dinamis (Ukuran BBOX)"
+        elif frontier_mode == "static":
+            mode_desc = f"🔒 Statis ({positive_frontier_score})"
+        else:
+            mode_desc = "🚫 Null / None (null)"
+        QMessageBox.information(
+            self,
+            "Fast Generate Sukses! 🎉",
+            f"Berhasil membuat {total_prompts_created} variasi prompt dari template split '{split_label}'!\n\n"
+            f"• Split: {split_label}\n"
+            f"• Template File: {os.path.basename(tpl_path)}\n"
+            f"• Jumlah Frame Diproses: {total_frames_processed} frame\n"
+            f"• Mode Frontier (Objek Positif): {mode_desc}\n"
+            f"• Skor Frontier (Negatif/Koridor): {frontier_score}\n"
+            f"• Format: Semantic Grounding JSON siap ekspor."
+        )
+
+    def _auto_generate_all_frames(self):
+        """Generate prompt variations for ALL annotated frames in active split with Semantic Grounding JSON."""
+        split_label = {"train": "Train", "val": "Validation", "test": "Test"}.get(self.active_split, self.active_split)
+        images = self.images_list
+        if not images:
+            QMessageBox.information(self, "Info", f"Tidak ada gambar pada split '{split_label}'.")
             return
 
         variations_per_box = [
@@ -806,11 +1194,12 @@ class TabPrompts(QWidget):
             for b in boxes:
                 lbl = b.get("label", "object")
                 b_2d = b.get("box_2d", [0, 0, 0, 0])
+                pos_score = TemplatePromptGenerator.calculate_dynamic_frontier_score(b_2d)
                 payload = {
                     "target_detected": True,
                     "label": lbl,
                     "bounding_box": b_2d,
-                    "frontier_score": None,
+                    "frontier_score": pos_score,
                 }
                 assistant_json = json.dumps(payload, ensure_ascii=False)
 
@@ -832,7 +1221,7 @@ class TabPrompts(QWidget):
             QMessageBox.warning(
                 self,
                 "Tidak Ada Bounding Box",
-                "Tidak ditemukan frame dengan bounding box di folder ini.\n"
+                f"Tidak ditemukan frame dengan bounding box pada split '{split_label}'.\n"
                 "Silakan kembali ke Menu 2 untuk menganotasi objek terlebih dahulu."
             )
             return
@@ -841,20 +1230,21 @@ class TabPrompts(QWidget):
         QMessageBox.information(
             self,
             "Batch Prompt Sukses! 🎉",
-            f"Berhasil membuat {total_prompts_created} variasi prompt untuk {total_frames_processed} frame teranotasi!\n\n"
+            f"Berhasil membuat {total_prompts_created} variasi prompt untuk {total_frames_processed} frame di split '{split_label}'!\n\n"
             "Format output: Semantic Grounding JSON siap latih."
         )
 
     def _add_negative_all_frames(self):
-        """Add frontier exploration prompts with score for all annotated frames."""
-        images = self.dataset_manager.get_image_list()
+        """Add frontier exploration prompts with score for all annotated frames in active split."""
+        split_label = {"train": "Train", "val": "Validation", "test": "Test"}.get(self.active_split, self.active_split)
+        images = self.images_list
         if not images:
-            QMessageBox.information(self, "Info", "Tidak ada gambar di folder aktif.")
+            QMessageBox.information(self, "Info", f"Tidak ada gambar pada split '{split_label}'.")
             return
 
         dlg = FrontierScoreDialog(
             current_score=0.85,
-            title="Frontier Score untuk Semua Frame",
+            title=f"Frontier Score untuk Frame Split {split_label}",
             parent=self
         )
         if dlg.exec() != QDialog.Accepted:
@@ -903,7 +1293,7 @@ class TabPrompts(QWidget):
         QMessageBox.information(
             self,
             "Frontier Prompt Ditambahkan",
-            f"Berhasil menambahkan {count} sampel frontier exploration (Score: {score}) ke seluruh frame teranotasi."
+            f"Berhasil menambahkan {count} sampel frontier exploration (Score: {score}) ke frame split '{split_label}'."
         )
 
     def _auto_generate_from_boxes(self):
@@ -931,11 +1321,12 @@ class TabPrompts(QWidget):
         for b in boxes:
             lbl = b.get("label", "object")
             b_2d = b.get("box_2d", [0, 0, 0, 0])
+            pos_score = TemplatePromptGenerator.calculate_dynamic_frontier_score(b_2d)
             payload = {
                 "target_detected": True,
                 "label": lbl,
                 "bounding_box": b_2d,
-                "frontier_score": None,
+                "frontier_score": pos_score,
             }
             assistant_json = json.dumps(payload, ensure_ascii=False)
 
@@ -979,46 +1370,4 @@ class TabPrompts(QWidget):
         self._save_current_prompts()
 
 
-    # ---------------- Export Function ----------------
-    def _browse_export_dir(self):
-        d = QFileDialog.getExistingDirectory(self, "Pilih Folder Tujuan Export")
-        if d:
-            self.export_dir_edit.setText(d)
 
-    def _run_export(self):
-        self._save_current_prompts()
-
-        out_dir = self.export_dir_edit.text().strip()
-        if not out_dir:
-            QMessageBox.warning(self, "Peringatan", "Tentukan folder tujuan export.")
-            return
-
-        fmt = self.format_combo.currentData()
-        method = self.split_method_combo.currentData() or "image"
-        ratio = self.split_slider.value() / 100.0
-        copy_img = self.copy_images_check.isChecked()
-
-        success, msg, stats = DatasetExporter.export(
-            dataset_manager=self.dataset_manager,
-            output_dir=out_dir,
-            format_type=fmt,
-            train_ratio=ratio,
-            split_method=method,
-            copy_images=copy_img,
-        )
-
-        if success:
-            summary = (
-                f"{msg}\n\n"
-                f"• Total Gambar: {stats.get('total_images')}\n"
-                f"  - Train: {stats.get('train_images')} gambar ({stats.get('train_samples')} sampel)\n"
-                f"  - Val: {stats.get('val_images')} gambar ({stats.get('val_samples')} sampel)\n"
-                f"• Positif (Ada Objek): {stats.get('positive_samples')}\n"
-                f"• Negatif ('null'): {stats.get('negative_samples_null')}\n"
-                f"• Bebas Kebocoran: Gambar di Train dan Val dijamin 100% terpisah!\n\n"
-                f"File tersimpan di:\n{out_dir}/train.jsonl\n{out_dir}/val.jsonl"
-            )
-            QMessageBox.information(self, "Export Berhasil! 🎉", summary)
-            self.dataset_exported.emit(out_dir)
-        else:
-            QMessageBox.warning(self, "Export Gagal", msg)

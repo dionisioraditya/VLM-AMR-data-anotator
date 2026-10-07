@@ -1,0 +1,220 @@
+id:
+1. Instruksi Langsung & Imperatif:
+
+Tolong cari X di ruangan ini.
+
+Cari X sampai ketemu.
+
+Temukan X di sekitar sini.
+
+Tolong carikan X sekarang.
+
+Coba cari di mana X berada.
+
+Deteksi dan temukan X di area ini.
+
+Lacak posisi X di dalam ruangan.
+
+Pindai ruangan dan temukan X.
+
+Telusuri seluruh ruangan untuk mencari X.
+
+Mulai pencarian untuk menemukan X.
+
+2. Pertanyaan Lokasi & Keberadaan:
+
+Di mana letak X?
+
+Kamu bisa lihat X di sekitar sini tidak?
+
+Apakah ada X di dalam ruangan ini?
+
+Di sebelah mana posisi X sekarang?
+
+X ditaruh di mana ya? Tolong carikan.
+
+Kelihatan tidak objek X di ruangan ini?
+
+X ada di sudut mana? Coba cek.
+
+Di area mana X tersimpan?
+
+Ada X di dekatmu tidak? Coba periksa.
+
+Di mana X terakhir terlihat? Tolong cari.
+
+3. Permintaan Bantuan & Sopan:
+Tolong bantu saya mencari X.
+
+Bisa tolong carikan X di sekitar area ini?
+
+Robot, tolong bantu temukan X ya.
+
+Mohon bantuannya untuk melacak keberadaan X.
+
+Tolong luangkan waktu untuk mencari X di ruangan ini.
+
+Permisi, bisakah kamu memeriksa apakah ada X di sini?
+
+Bisakah kamu membantu saya menemukan letak X?
+
+Tolong jelajahi ruangan dan laporkan jika melihat X.
+
+Coba tolong carikan X, sepertinya tertinggal di sini.
+
+Bantu saya mengecek keberadaan X di ruangan ini.
+
+4. Berorientasi Aksi Lanjutan / Pengambilan:
+
+Cari X dan dekati posisinya.
+
+Tolong cari X lalu berhenti tepat di depannya.
+
+Temukan X dan tunjukkan lokasinya kepada saya.
+
+Pergi dan cari X di ruangan ini.
+
+Tolong temukan X dan arahkan kameramu ke sana.
+
+Cari X dan tandai koordinat posisinya.
+
+Identifikasi lokasi X agar bisa diambil.
+
+Temukan X lalu beri sinyal jika sudah terlihat.
+
+Navigasi ke sekitar ruangan sampai kamu menemukan X.
+
+Cari objek bernama X dan kunci posisinya.
+
+5. Konteks Kasual, Ambigu, atau Situasional:
+
+Saya kehilangan X, tolong bantu cari di sini.
+
+X saya sepertinya jatuh di ruangan ini, tolong carikan.
+
+Coba keliling ruangan, siapa tahu ketemu X.
+
+Robot, cek seluruh lantai ini dan cari X.
+
+Ada yang ketinggalan, tolong carikan X.
+
+Tolong inspeksi ruangan ini dan temukan X.
+
+Coba patroli sebentar dan cari apakah ada X.
+
+Cek setiap sudut ruangan untuk menemukan X.
+
+Saya butuh X sekarang, tolong cari sampai dapat.
+
+Sisir area ini dan temukan di mana X berada.
+
+en:
+1. Direct & Imperative Commands:
+
+Find X in this room.
+
+Search for X until you locate it.
+
+Locate X around here.
+
+Go look for X right now.
+
+Track down the position of X in this area.
+
+Scan the room and find X.
+
+Detect and identify where X is.
+
+Search the entire floor for X.
+
+Start looking for object X.
+
+Explore the environment and find X.
+
+2. Location & Detection Queries:
+
+Where is X located?
+
+Can you see X anywhere around here?
+
+Is there an X in this room?
+
+Which part of the room has X?
+
+Do you spot X from where you are?
+
+Where was X placed? Please find it.
+
+In which corner is X situated? Check around.
+
+Can you detect any X in this area?
+
+Where is X currently positioned?
+
+Do you see an object that looks like X?
+
+3. Polite Requests & Assistance:
+
+Please help me find X.
+
+Could you look for X around here?
+
+Robot, please help me locate X.
+
+Would you mind scanning this space for X?
+
+Can you please check if there is an X in this area?
+
+Help me track down where X is.
+
+Could you please search around and report if you see X?
+
+Please take a look around the room for X.
+
+I could use some help locating X in this room.
+
+Could you assist me by finding where X is?
+
+4. Goal-Oriented & Downstream Actions:
+
+Find X and approach it.
+
+Locate X and stop right in front of it.
+
+Find X and point your camera toward it.
+
+Search for X and mark its coordinates.
+
+Navigate around the room until you detect X.
+
+Identify X so I can retrieve it.
+
+Go find X and alert me once it's in view.
+
+Detect X and move closer to its position.
+
+Find X and keep it centered in your frame.
+
+Locate object X and confirm its placement.
+
+5. Situational, Casual & Contextual:
+
+I lost my X, please help me search for it here.
+
+I think I left X in this room, can you look for it?
+
+Patrol the area and see if you can spot X.
+
+Inspect every corner of the room to find X.
+
+Wander around the floor to track down X.
+
+I need X right now, please find where it is.
+
+Check around the room, X might be lying somewhere here.
+
+Sweep through this zone and find X.
+
+See if X is hidden somewhere in this room.
+
+Walk around the space and let me know when you see X.

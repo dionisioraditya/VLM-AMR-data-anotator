@@ -5,7 +5,8 @@ from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QListWidget, QListWidgetItem, QComboBox, QLineEdit, QSplitter,
     QMessageBox, QFrame, QInputDialog, QToolButton, QDialog,
-    QProgressBar, QCheckBox, QFileDialog, QAbstractItemView, QDoubleSpinBox
+    QProgressBar, QCheckBox, QFileDialog, QAbstractItemView, QDoubleSpinBox,
+    QGroupBox
 )
 from ui.components.canvas import AnnotationCanvas
 from core.gemini_client import GeminiClient
@@ -220,12 +221,20 @@ class BatchDetectionDialog(QDialog):
         self.model_combo.clear()
         if backend == GeminiClient.BACKEND_AGY:
             self.model_combo.addItem("gemini-3.8-flash-low (Sangat Cepat & Akurat - Rekomendasi)", "gemini-3.8-flash-low")
+            self.model_combo.addItem("gemini-3.8-flash-medium (Seimbang)", "gemini-3.8-flash-medium")
+            self.model_combo.addItem("gemini-3.8-flash-high (Penalaran Detail)", "gemini-3.8-flash-high")
+            self.model_combo.addItem("gemini-3.7-flash-medium", "gemini-3.7-flash-medium")
             self.model_combo.addItem("gemini-3.6-flash-low (Ringan & Cepat)", "gemini-3.6-flash-low")
-            self.model_combo.addItem("gemini-3.8-flash-high (Penalaran Detail / Thinking)", "gemini-3.8-flash-high")
-            self.model_combo.addItem("gemini-3.6-flash-high (Penalaran Detail)", "gemini-3.6-flash-high")
+            self.model_combo.addItem("gemini-3.6-flash-medium", "gemini-3.6-flash-medium")
+            self.model_combo.addItem("gemini-3.6-flash-high", "gemini-3.6-flash-high")
+            self.model_combo.addItem("gemini-3.1-pro-low", "gemini-3.1-pro-low")
             self.model_combo.addItem("gemini-3.1-pro-high (Penalaran Kompleks)", "gemini-3.1-pro-high")
-            self.model_combo.addItem("claude-sonnet-4-6 (Claude Sonnet 4.6 Thinking)", "claude-sonnet-4-6")
-            self.model_combo.addItem("claude-opus-4-6-thinking (Claude Opus 4.6 Thinking)", "claude-opus-4-6-thinking")
+            self.model_combo.addItem("claude-sonnet-5-5-low (Claude Sonnet 5.5 - Cepat)", "claude-sonnet-5-5-low")
+            self.model_combo.addItem("claude-sonnet-5-5-medium (Claude Sonnet 5.5 - Rekomendasi)", "claude-sonnet-5-5-medium")
+            self.model_combo.addItem("claude-sonnet-5-5-high (Claude Sonnet 5.5 - Detail)", "claude-sonnet-5-5-high")
+            self.model_combo.addItem("claude-opus-5-5-low (Claude Opus 5.5 - Cepat)", "claude-opus-5-5-low")
+            self.model_combo.addItem("claude-opus-5-5-medium (Claude Opus 5.5 - Rekomendasi)", "claude-opus-5-5-medium")
+            self.model_combo.addItem("claude-opus-5-5-high (Claude Opus 5.5 - Detail)", "claude-opus-5-5-high")
             self.model_combo.addItem("gpt-oss-120b-medium (GPT-OSS 120B Medium)", "gpt-oss-120b-medium")
             self.delay_spin.setValue(0.5)
             self.delay_spin.setSuffix(" detik (CLI local)")
@@ -334,24 +343,26 @@ class BatchDetectionDialog(QDialog):
             self.accept()
 
 class ClassManagerDialog(QDialog):
-    """Dialog to view, add, and remove target class labels in bulk."""
+    """Dialog to view, add, rename, and remove target class labels with automatic bounding box sync and multilingual synonyms."""
+    class_renamed = Signal(str, str)  # old_name, new_name
 
     def __init__(self, dataset_manager, parent=None):
         super().__init__(parent)
         self.dataset_manager = dataset_manager
-        self.setWindowTitle("Kelola Daftar Label")
-        self.setFixedWidth(380)
-        self.setFixedHeight(440)
+        self._current_selected_label = None
+        self.setWindowTitle("Kelola Daftar Label & Sinonim")
+        self.setFixedWidth(460)
+        self.setFixedHeight(660)
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(10)
 
-        title = QLabel("⚙️ Kelola Daftar Label")
+        title = QLabel("⚙️ Kelola Daftar Label & Sinonim")
         title.setObjectName("titleLabel")
         layout.addWidget(title)
 
-        subtitle = QLabel("Pilih label yang ingin dihapus, atau tambahkan label baru:")
+        subtitle = QLabel("Pilih label untuk mengubah nama, mengedit sinonim, atau tambahkan label baru:")
         subtitle.setObjectName("subtitleLabel")
         subtitle.setWordWrap(True)
         layout.addWidget(subtitle)
@@ -360,12 +371,84 @@ class ClassManagerDialog(QDialog):
         self.list_widget = QListWidget()
         for c in self.dataset_manager.classes:
             self.list_widget.addItem(c)
+        self.list_widget.currentRowChanged.connect(self._on_item_selected)
         layout.addWidget(self.list_widget)
+
+        # Rename section for selected class
+        rename_group = QGroupBox("Ubah Nama Label Terpilih")
+        rename_layout = QVBoxLayout(rename_group)
+        rename_layout.setSpacing(8)
+
+        rename_row = QHBoxLayout()
+        self.rename_class_edit = QLineEdit()
+        self.rename_class_edit.setPlaceholderText("Pilih label di atas untuk diubah...")
+        self.rename_class_edit.returnPressed.connect(self._rename_selected)
+        
+        self.rename_btn = QPushButton("✏️ Ubah Nama")
+        self.rename_btn.setObjectName("primaryBtn")
+        self.rename_btn.setEnabled(False)
+        self.rename_btn.clicked.connect(self._rename_selected)
+        rename_row.addWidget(self.rename_class_edit)
+        rename_row.addWidget(self.rename_btn)
+        rename_layout.addLayout(rename_row)
+
+        self.update_boxes_check = QCheckBox("Perbarui otomatis semua bounding box dengan label ini")
+        self.update_boxes_check.setChecked(True)
+        self.update_boxes_check.setToolTip(
+            "Jika dicentang, seluruh bounding box yang sudah ada di dataset dengan label lama\n"
+            "akan otomatis diganti ke label baru tanpa perlu dianotasi ulang."
+        )
+        rename_layout.addWidget(self.update_boxes_check)
+        layout.addWidget(rename_group)
+
+        # Synonyms section for selected class
+        syn_group = QGroupBox("Sinonim Label Terpilih (Variasi Prompt)")
+        syn_layout = QVBoxLayout(syn_group)
+        syn_layout.setSpacing(8)
+
+        syn_desc = QLabel("Variasi kosa kata saat generate prompt (pisahkan dengan koma):")
+        syn_desc.setWordWrap(True)
+        syn_desc.setStyleSheet("color: #888; font-size: 11px;")
+        syn_layout.addWidget(syn_desc)
+
+        id_row = QHBoxLayout()
+        id_lbl = QLabel("🇮🇩 ID:")
+        id_lbl.setFixedWidth(45)
+        self.syn_id_edit = QLineEdit()
+        self.syn_id_edit.setPlaceholderText("misal: tempat sampah, tong sampah")
+        self.syn_id_edit.setEnabled(False)
+        self.syn_id_edit.returnPressed.connect(lambda: self._save_synonyms(show_msg=True))
+        id_row.addWidget(id_lbl)
+        id_row.addWidget(self.syn_id_edit)
+        syn_layout.addLayout(id_row)
+
+        en_row = QHBoxLayout()
+        en_lbl = QLabel("🇬🇧 EN:")
+        en_lbl.setFixedWidth(45)
+        self.syn_en_edit = QLineEdit()
+        self.syn_en_edit.setPlaceholderText("misal: trash can, garbage bin")
+        self.syn_en_edit.setEnabled(False)
+        self.syn_en_edit.returnPressed.connect(lambda: self._save_synonyms(show_msg=True))
+        en_row.addWidget(en_lbl)
+        en_row.addWidget(self.syn_en_edit)
+        syn_layout.addLayout(en_row)
+
+        syn_btn_row = QHBoxLayout()
+        syn_btn_row.addStretch()
+        self.save_syn_btn = QPushButton("💾 Simpan Sinonim")
+        self.save_syn_btn.setObjectName("primaryBtn")
+        self.save_syn_btn.setEnabled(False)
+        self.save_syn_btn.clicked.connect(lambda: self._save_synonyms(show_msg=True))
+        syn_btn_row.addWidget(self.save_syn_btn)
+        syn_layout.addLayout(syn_btn_row)
+
+        layout.addWidget(syn_group)
 
         # Add input row
         add_row = QHBoxLayout()
         self.new_class_edit = QLineEdit()
         self.new_class_edit.setPlaceholderText("Nama label baru (misal: dispenser)...")
+        self.new_class_edit.returnPressed.connect(self._add_class)
         add_btn = QPushButton("➕ Tambah")
         add_btn.setObjectName("primaryBtn")
         add_btn.clicked.connect(self._add_class)
@@ -374,10 +457,11 @@ class ClassManagerDialog(QDialog):
         layout.addLayout(add_row)
 
         # Delete selected button
-        del_btn = QPushButton("🗑️ Hapus Label Terpilih")
-        del_btn.setObjectName("dangerBtn")
-        del_btn.clicked.connect(self._delete_selected)
-        layout.addWidget(del_btn)
+        self.del_btn = QPushButton("🗑️ Hapus Label Terpilih")
+        self.del_btn.setObjectName("dangerBtn")
+        self.del_btn.setEnabled(False)
+        self.del_btn.clicked.connect(self._delete_selected)
+        layout.addWidget(self.del_btn)
 
         # Close button
         btn_row = QHBoxLayout()
@@ -387,6 +471,91 @@ class ClassManagerDialog(QDialog):
         close_btn.clicked.connect(self.accept)
         btn_row.addWidget(close_btn)
         layout.addLayout(btn_row)
+
+    def _save_synonyms_for_label(self, label: str):
+        if not label:
+            return
+        id_text = self.syn_id_edit.text()
+        en_text = self.syn_en_edit.text()
+        id_syns = [s.strip() for s in id_text.split(",") if s.strip()]
+        en_syns = [s.strip() for s in en_text.split(",") if s.strip()]
+        self.dataset_manager.set_class_synonyms(label, "id", id_syns)
+        self.dataset_manager.set_class_synonyms(label, "en", en_syns)
+
+    def _save_synonyms(self, show_msg: bool = True):
+        row = self.list_widget.currentRow()
+        if row < 0:
+            return
+        item = self.list_widget.item(row)
+        if not item:
+            return
+        lbl = item.text().strip()
+        if not lbl:
+            return
+        self._save_synonyms_for_label(lbl)
+        if show_msg:
+            QMessageBox.information(self, "Sinonim Disimpan", f"Sinonim untuk label '{lbl}' berhasil disimpan!")
+
+    def _on_item_selected(self, row: int):
+        # Auto-save previous selection if any
+        if self._current_selected_label and self.syn_id_edit.isEnabled():
+            self._save_synonyms_for_label(self._current_selected_label)
+
+        if row >= 0:
+            item = self.list_widget.item(row)
+            if item:
+                lbl = item.text().strip()
+                self._current_selected_label = lbl
+                self.rename_class_edit.setText(lbl)
+                self.rename_btn.setEnabled(True)
+                self.del_btn.setEnabled(True)
+
+                id_syns = self.dataset_manager.get_class_synonyms(lbl, "id")
+                en_syns = self.dataset_manager.get_class_synonyms(lbl, "en")
+                self.syn_id_edit.setText(", ".join(id_syns))
+                self.syn_en_edit.setText(", ".join(en_syns))
+                self.syn_id_edit.setEnabled(True)
+                self.syn_en_edit.setEnabled(True)
+                self.save_syn_btn.setEnabled(True)
+        else:
+            self._current_selected_label = None
+            self.rename_class_edit.clear()
+            self.rename_btn.setEnabled(False)
+            self.del_btn.setEnabled(False)
+            self.syn_id_edit.clear()
+            self.syn_en_edit.clear()
+            self.syn_id_edit.setEnabled(False)
+            self.syn_en_edit.setEnabled(False)
+            self.save_syn_btn.setEnabled(False)
+
+    def _rename_selected(self):
+        row = self.list_widget.currentRow()
+        if row < 0:
+            return
+        item = self.list_widget.item(row)
+        old_lbl = item.text().strip()
+        new_lbl = self.rename_class_edit.text().strip().lower()
+
+        if not new_lbl:
+            QMessageBox.warning(self, "Peringatan", "Nama label baru tidak boleh kosong.")
+            return
+
+        if old_lbl == new_lbl:
+            return
+
+        # Save any current synonym edits before renaming
+        self._save_synonyms_for_label(old_lbl)
+
+        update_boxes = self.update_boxes_check.isChecked()
+        count = self.dataset_manager.rename_class(old_lbl, new_lbl, update_annotations=update_boxes)
+        item.setText(new_lbl)
+        self._current_selected_label = new_lbl
+        self.class_renamed.emit(old_lbl, new_lbl)
+
+        msg = f"Label '{old_lbl}' berhasil diubah menjadi '{new_lbl}'."
+        if update_boxes:
+            msg += f"\n\nSebanyak {count} bounding box di dataset otomatis diperbarui!"
+        QMessageBox.information(self, "Label Diperbarui 🎉", msg)
 
     def _add_class(self):
         txt = self.new_class_edit.text().strip().lower()
@@ -399,8 +568,15 @@ class ClassManagerDialog(QDialog):
         row = self.list_widget.currentRow()
         if row >= 0:
             item = self.list_widget.takeItem(row)
-            lbl = item.text()
+            lbl = item.text().strip()
             self.dataset_manager.remove_class(lbl)
+            self._current_selected_label = None
+            self._on_item_selected(self.list_widget.currentRow())
+
+    def accept(self):
+        if self._current_selected_label and self.syn_id_edit.isEnabled():
+            self._save_synonyms_for_label(self._current_selected_label)
+        super().accept()
 
 
 class TabAnnotate(QWidget):
@@ -649,6 +825,30 @@ class TabAnnotate(QWidget):
         self.box_list_widget.currentRowChanged.connect(self._on_box_item_clicked)
         right_layout.addWidget(self.box_list_widget)
 
+        # Quick Change Label for Selected Box
+        box_edit_card = QFrame()
+        box_edit_card.setObjectName("card")
+        box_edit_layout = QVBoxLayout(box_edit_card)
+        box_edit_layout.setContentsMargins(8, 8, 8, 8)
+        box_edit_layout.setSpacing(6)
+
+        edit_label_title = QLabel("Ganti Label Box Terpilih:")
+        edit_label_title.setStyleSheet("font-size: 11px; color: #cbd5e1; font-weight: 600;")
+        box_edit_layout.addWidget(edit_label_title)
+
+        box_label_row = QHBoxLayout()
+        self.box_label_combo = QComboBox()
+        self.box_label_combo.addItems(self.dataset_manager.classes)
+        self.apply_box_label_btn = QPushButton("✏️ Ganti Label")
+        self.apply_box_label_btn.setObjectName("primaryBtn")
+        self.apply_box_label_btn.setToolTip("Ubah label bounding box yang sedang dipilih dengan label yang dipilih di samping")
+        self.apply_box_label_btn.clicked.connect(self._apply_label_to_selected_box)
+        box_label_row.addWidget(self.box_label_combo, 1)
+        box_label_row.addWidget(self.apply_box_label_btn)
+        box_edit_layout.addLayout(box_label_row)
+
+        right_layout.addWidget(box_edit_card)
+
         # Box Action Buttons
         box_btn_row = QHBoxLayout()
         self.del_box_btn = QPushButton("Hapus Box (Del)")
@@ -863,12 +1063,15 @@ class TabAnnotate(QWidget):
         self.dataset_updated.emit()
 
     def _update_current_list_item_icon(self):
-        row = self.image_list_widget.currentRow()
-        if row >= 0:
-            item = self.image_list_widget.item(row)
-            is_ann = len(self.canvas.boxes) > 0
-            icon_prefix = "🟢" if is_ann else "⚪"
-            item.setText(f"{icon_prefix} {self.current_image_name}")
+        if not self.current_image_name:
+            return
+        for idx in range(self.image_list_widget.count()):
+            item = self.image_list_widget.item(idx)
+            if item and item.data(Qt.UserRole) == self.current_image_name:
+                is_ann = len(self.canvas.boxes) > 0
+                icon_prefix = "🟢" if is_ann else "⚪"
+                item.setText(f"{icon_prefix} {self.current_image_name}")
+                break
 
     def _refresh_box_list_ui(self):
         self.box_list_widget.blockSignals(True)
@@ -888,11 +1091,38 @@ class TabAnnotate(QWidget):
     def _on_box_item_clicked(self, row: int):
         self.canvas.selected_index = row
         self.canvas.viewport().update()
+        if 0 <= row < len(self.canvas.boxes) and hasattr(self, "box_label_combo"):
+            b_lbl = self.canvas.boxes[row].get("label", "")
+            idx = self.box_label_combo.findText(b_lbl)
+            if idx >= 0:
+                self.box_label_combo.setCurrentIndex(idx)
 
     def _on_canvas_box_selected(self, index: int):
         self.box_list_widget.blockSignals(True)
         self.box_list_widget.setCurrentRow(index)
         self.box_list_widget.blockSignals(False)
+        if 0 <= index < len(self.canvas.boxes) and hasattr(self, "box_label_combo"):
+            b_lbl = self.canvas.boxes[index].get("label", "")
+            idx = self.box_label_combo.findText(b_lbl)
+            if idx >= 0:
+                self.box_label_combo.setCurrentIndex(idx)
+
+    def _apply_label_to_selected_box(self):
+        idx = self.canvas.selected_index
+        if idx < 0 or idx >= len(self.canvas.boxes):
+            QMessageBox.information(self, "Pilih Box", "Pilih bounding box terlebih dahulu di gambar atau daftar di atas.")
+            return
+
+        new_lbl = self.box_label_combo.currentText().strip()
+        if not new_lbl:
+            return
+
+        self.canvas.boxes[idx]["label"] = new_lbl
+        self.canvas.viewport().update()
+        self._save_current_annotations()
+        self._refresh_box_list_ui()
+        self._update_stats()
+        self.dataset_updated.emit()
 
     def _on_class_changed(self, text: str):
         self.canvas.set_current_label(text)
@@ -905,6 +1135,8 @@ class TabAnnotate(QWidget):
             if self.class_combo.findText(clean_name) == -1:
                 self.class_combo.addItem(clean_name)
             self.class_combo.setCurrentText(clean_name)
+            if hasattr(self, "box_label_combo") and self.box_label_combo.findText(clean_name) == -1:
+                self.box_label_combo.addItem(clean_name)
 
     def _delete_current_class(self):
         curr_label = self.class_combo.currentText().strip()
@@ -927,9 +1159,14 @@ class TabAnnotate(QWidget):
                 self.class_combo.setCurrentIndex(0)
             else:
                 self.canvas.set_current_label("object")
+            if hasattr(self, "box_label_combo"):
+                b_idx = self.box_label_combo.findText(curr_label)
+                if b_idx >= 0:
+                    self.box_label_combo.removeItem(b_idx)
 
     def _open_class_manager(self):
         dialog = ClassManagerDialog(self.dataset_manager, parent=self)
+        dialog.class_renamed.connect(self._on_class_renamed)
         if dialog.exec():
             # Refresh class_combo with updated classes
             curr = self.class_combo.currentText()
@@ -943,6 +1180,50 @@ class TabAnnotate(QWidget):
                 self.class_combo.setCurrentIndex(0)
             self.class_combo.blockSignals(False)
             self.canvas.set_current_label(self.class_combo.currentText() or "object")
+
+            if hasattr(self, "box_label_combo"):
+                curr_b = self.box_label_combo.currentText()
+                self.box_label_combo.blockSignals(True)
+                self.box_label_combo.clear()
+                self.box_label_combo.addItems(self.dataset_manager.classes)
+                b_idx = self.box_label_combo.findText(curr_b)
+                if b_idx >= 0:
+                    self.box_label_combo.setCurrentIndex(b_idx)
+                self.box_label_combo.blockSignals(False)
+
+    def _on_class_renamed(self, old_label: str, new_label: str):
+        # 1. Update in-memory canvas boxes for the currently active frame
+        changed = False
+        for b in self.canvas.boxes:
+            if b.get("label") == old_label:
+                b["label"] = new_label
+                changed = True
+        if changed:
+            self.canvas.viewport().update()
+            self._save_current_annotations()
+            self._refresh_box_list_ui()
+
+        # 2. Update class_combo
+        self.class_combo.blockSignals(True)
+        self.class_combo.clear()
+        self.class_combo.addItems(self.dataset_manager.classes)
+        idx = self.class_combo.findText(new_label)
+        if idx >= 0:
+            self.class_combo.setCurrentIndex(idx)
+        self.class_combo.blockSignals(False)
+        self.canvas.set_current_label(self.class_combo.currentText() or "object")
+
+        # 3. Update box_label_combo
+        if hasattr(self, "box_label_combo"):
+            self.box_label_combo.blockSignals(True)
+            self.box_label_combo.clear()
+            self.box_label_combo.addItems(self.dataset_manager.classes)
+            idx = self.box_label_combo.findText(new_label)
+            if idx >= 0:
+                self.box_label_combo.setCurrentIndex(idx)
+            self.box_label_combo.blockSignals(False)
+
+        self.dataset_updated.emit()
 
     def _on_engine_changed(self, index: int):
         backend = self.engine_combo.currentData()

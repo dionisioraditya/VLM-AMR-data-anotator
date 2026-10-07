@@ -1,0 +1,43 @@
+id:
+Robot, arahkan sensor ke X jika terlihat di ruangan.
+Beri tahu saya koordinat X untuk navigasi selanjutnya.
+Tujuan berikutnya adalah X, tunjukkan di mana posisinya.
+Apakah jalur menuju X terdeteksi di kamera depan?
+Petakan posisi kotak pembatas untuk target X.
+Laporkan posisi X bila terdeteksi di lingkungan ini.
+Target orientasi: X. Tunjukkan bounding box objek tersebut.
+Identifikasi target navigasi X dari pandangan robot.
+Cari tahu apakah ada objek X pada pandangan saat ini.
+Sensor deteksi, tentukan koordinat dari objek X.
+Navigasi membutuhkan lokasi X, tolong beri tahu posisinya.
+Apakah ada rintangan atau target berupa X di sekitar?
+Temukan koordinat spasial X agar robot dapat mendekat.
+Kamera robot mendeteksi ruangan, di manakah objek X?
+Kirimkan bounding box dari X jika tampak di kamera.
+Tunjukkan posisi X sebagai tujuan panduan visual.
+Pindai koridor dan tentukan lokasi X secara tepat.
+Berikan koordinat visual untuk objek X saat ini.
+Apakah sensor visual menemukan tanda-tanda adanya X?
+Fokuskan deteksi visual pada objek X di area sekitar.
+
+en:
+Robot, direct your sensors toward X if visible in the room.
+Provide the bounding coordinates of X for downstream navigation.
+The next target waypoint is X, locate where it is.
+Is the pathway leading to X detectable in the front camera?
+Map the bounding box boundary for target object X.
+Report the spatial coordinates of X if discovered in this area.
+Orientation target: X. Point out the bounding box for it.
+Identify navigation target X from the robotic perspective.
+Determine whether there is any instance of X in this view.
+Perception sensor, specify the spatial coordinates of object X.
+Navigation requires the position of X, please indicate where it is.
+Are there any obstacles or targets matching X nearby?
+Extract the spatial bounding box for X so the robot can approach.
+The robot camera is scanning the room, where is object X located?
+Transmit the bounding box of X if it appears on screen.
+Highlight the location of X as the visual guidance target.
+Scan the corridor and precisely determine the position of X.
+Output the visual coordinate vector for object X right now.
+Did visual sensors detect any sign of X in this direction?
+Focus visual perception routines on detecting object X nearby.

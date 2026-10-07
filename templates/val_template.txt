@@ -1,0 +1,43 @@
+id:
+Periksa apakah terdapat X pada tampilan kamera ini.
+Konfirmasi letak koordinat X jika tampak di sekitar.
+Identifikasi keberadaan X di area pandang saat ini.
+Apakah kamera mendeteksi adanya objek X di ruangan ini?
+Cek apakah ada X yang terlihat jelas pada sudut ini.
+Tandai posisi X bila objek tersebut berada di ruangan.
+Amati sekeliling dan laporkan bila menemukan X.
+Dapatkah sistem mengidentifikasi objek X sekarang?
+Tentukan lokasi presisi dari X pada citra.
+Apakah X tampak berada dalam jarak jangkauan robot?
+Verifikasi apakah objek di depan merupakan X.
+Perhatikan sekitar ruangan, adakah penampakan X?
+Sebutkan dan tunjukkan koordinat bounding box untuk X.
+Lakukan pengecekan visual untuk menemukan X.
+Apakah objek X dapat dikenali pada tangkapan layar ini?
+Tolong pastikan apakah X ada di dalam koridor ini.
+Analisis pemandangan ini dan cari apakah ada X.
+Deteksi objek X dan laporkan koordinat lokasinya.
+Tolong konfirmasi apakah kamu melihat objek X.
+Pastikan keberadaan objek X di lingkungan ini.
+
+en:
+Verify if there is any X present in this camera frame.
+Confirm the coordinates of X if visible in the surroundings.
+Identify whether X exists in the current field of view.
+Does the sensor detect any X in this room?
+Check whether an object corresponding to X can be seen.
+Mark the location of X if it appears in the scene.
+Observe the visual feed and report if you spot X.
+Can the perception system identify X at this moment?
+Determine the precise spatial location of X in the image.
+Is X visible within the operational range of the robot?
+Inspect the area in front and verify if X is present.
+Scan the visual frame to assess the presence of X.
+Please indicate the bounding box coordinates for X.
+Perform a visual check to confirm the location of X.
+Can you recognize any instance of X in this snapshot?
+Confirm whether X is situated inside this corridor.
+Analyze this environment and determine if X exists.
+Locate the target X and provide its spatial boundaries.
+Check if X is observable anywhere in the vicinity.
+Ascertain the presence of X across this indoor scene.
