@@ -1,12 +1,74 @@
 import os
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, Signal, QSize
 from PySide6.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QPushButton,
     QFileDialog, QRadioButton, QButtonGroup, QSpinBox, QCheckBox,
     QLineEdit, QProgressBar, QMessageBox, QFrame, QGroupBox,
-    QListWidget, QListWidgetItem, QAbstractItemView
+    QListWidget, QListWidgetItem, QAbstractItemView, QComboBox
 )
 from core.video_extractor import VideoExtractor
+
+
+class VideoQueueItemWidget(QWidget):
+    """Custom card row widget for each queued video with right-side split category dropdown."""
+    role_changed = Signal(str, str)  # (video_path, new_role)
+
+    def __init__(self, video_path: str, initial_role: str = "train_val", parent=None):
+        super().__init__(parent)
+        self.video_path = video_path
+        file_name = os.path.basename(video_path)
+        file_size_mb = os.path.getsize(video_path) / (1024 * 1024) if os.path.isfile(video_path) else 0.0
+
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(10, 4, 10, 4)
+        layout.setSpacing(10)
+
+        self.name_label = QLabel(f"🎬 {file_name}")
+        self.name_label.setStyleSheet("font-weight: 600; background: transparent;")
+        self.size_label = QLabel(f"({file_size_mb:.1f} MB)")
+        self.size_label.setStyleSheet("color: #94a3b8; font-size: 11px; background: transparent;")
+
+        layout.addWidget(self.name_label)
+        layout.addWidget(self.size_label)
+        layout.addStretch()
+
+        cat_lbl = QLabel("Kategori:")
+        cat_lbl.setStyleSheet("color: #94a3b8; font-size: 11px; background: transparent;")
+        layout.addWidget(cat_lbl)
+
+        self.role_combo = QComboBox()
+        self.role_combo.addItem("🟢 Train & Val", "train_val")
+        self.role_combo.addItem("🔵 Test Only", "test")
+        self.role_combo.setFixedWidth(145)
+        self.role_combo.setToolTip(
+            "Pilih peran video ini untuk pembagian dataset di Menu 3:\n"
+            "• Train & Val: Frame akan dibagi untuk pelatihan & validasi.\n"
+            "• Test Only: 100% frame dari video ini khusus masuk ke Test Set (bebas data leakage)."
+        )
+
+        idx = 1 if (initial_role or "").lower().strip() == "test" else 0
+        self.role_combo.setCurrentIndex(idx)
+        self._update_combo_style()
+        self.role_combo.currentIndexChanged.connect(self._on_combo_changed)
+        layout.addWidget(self.role_combo)
+
+    def get_role(self) -> str:
+        return self.role_combo.currentData() or "train_val"
+
+    def _on_combo_changed(self):
+        self._update_combo_style()
+        self.role_changed.emit(self.video_path, self.get_role())
+
+    def _update_combo_style(self):
+        role = self.get_role()
+        if role == "test":
+            self.role_combo.setStyleSheet(
+                "QComboBox { border: 1px solid #38bdf8; color: #38bdf8; font-weight: 600; padding: 3px 8px; }"
+            )
+        else:
+            self.role_combo.setStyleSheet(
+                "QComboBox { border: 1px solid #22c55e; color: #22c55e; font-weight: 600; padding: 3px 8px; }"
+            )
 
 
 class VideoQueueListWidget(QListWidget):
@@ -64,27 +126,14 @@ class TabVideo(QWidget):
         self.dataset_manager = dataset_manager
         self.extractor = VideoExtractor()
         self.worker_thread = None
+        self._queued_video_roles: dict[str, str] = {}
 
         self._init_ui()
 
     def _init_ui(self):
         main_layout = QVBoxLayout(self)
-        main_layout.setContentsMargins(24, 24, 24, 24)
-        main_layout.setSpacing(18)
-
-        # Header Info Card
-        header_card = QFrame()
-        header_card.setObjectName("card")
-        header_layout = QVBoxLayout(header_card)
-        header_layout.setContentsMargins(16, 16, 16, 16)
-
-        title = QLabel("🎬 Ekstraksi Video ke Kumpulan Frame Gambar (Multi-Video)")
-        title.setObjectName("titleLabel")
-        subtitle = QLabel("Potong satu atau beberapa rekaman video kamera AMR/Robotik secara batch menjadi frame untuk bahan anotasi VLM.")
-        subtitle.setObjectName("subtitleLabel")
-        header_layout.addWidget(title)
-        header_layout.addWidget(subtitle)
-        main_layout.addWidget(header_card)
+        main_layout.setContentsMargins(20, 16, 20, 16)
+        main_layout.setSpacing(14)
 
         # Settings Group Box
         settings_box = QGroupBox("Pengaturan Input Video & Folder Output")
@@ -125,8 +174,8 @@ class TabVideo(QWidget):
         # Video Queue List
         self.video_list_widget = VideoQueueListWidget()
         self.video_list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
-        self.video_list_widget.setFixedHeight(115)
-        self.video_list_widget.setToolTip("Daftar video yang akan diproses. Anda bisa memilih beberapa item dan menekan tombol Delete.")
+        self.video_list_widget.setFixedHeight(225)
+        self.video_list_widget.setToolTip("Daftar video yang akan diproses. Pilih kategori (Train & Val / Test Only) di sisi kanan tiap item.")
         self.video_list_widget.delete_pressed.connect(self._remove_selected_videos)
         self.video_list_widget.itemSelectionChanged.connect(self._on_item_selection_changed)
         settings_layout.addWidget(self.video_list_widget)
@@ -289,14 +338,23 @@ class TabVideo(QWidget):
                 self.video_list_widget.item(i).data(Qt.UserRole)
                 for i in range(self.video_list_widget.count())
             }
+            saved_roles = getattr(self.dataset_manager, "video_roles", {}) or {}
             added_count = 0
             for path in file_paths:
                 if path not in existing:
-                    file_size_mb = os.path.getsize(path) / (1024 * 1024) if os.path.isfile(path) else 0
-                    item = QListWidgetItem(f"🎬 {os.path.basename(path)}  ({file_size_mb:.1f} MB)")
+                    base_name = os.path.basename(path)
+                    initial_role = saved_roles.get(base_name, "train_val")
+
+                    item = QListWidgetItem()
                     item.setData(Qt.UserRole, path)
                     item.setToolTip(path)
+                    item.setSizeHint(QSize(0, 42))
+
+                    row_widget = VideoQueueItemWidget(path, initial_role=initial_role)
+                    row_widget.role_changed.connect(lambda *_: self._update_video_count())
+
                     self.video_list_widget.addItem(item)
+                    self.video_list_widget.setItemWidget(item, row_widget)
                     existing.add(path)
                     added_count += 1
 
@@ -326,7 +384,21 @@ class TabVideo(QWidget):
 
     def _update_video_count(self):
         cnt = self.video_list_widget.count()
-        self.video_count_label.setText(f"({cnt} video dipilih)")
+        if cnt > 0:
+            tv_cnt = 0
+            test_cnt = 0
+            for i in range(cnt):
+                item = self.video_list_widget.item(i)
+                w = self.video_list_widget.itemWidget(item)
+                role = w.get_role() if w else "train_val"
+                if role == "test":
+                    test_cnt += 1
+                else:
+                    tv_cnt += 1
+            self.video_count_label.setText(f"({cnt} video dipilih: {tv_cnt} Train & Val • {test_cnt} Test Only)")
+        else:
+            self.video_count_label.setText("(0 video dipilih)")
+
         self.clear_videos_btn.setEnabled(cnt > 0)
         self.start_btn.setEnabled(cnt > 0)
         self.remove_video_btn.setEnabled(len(self.video_list_widget.selectedItems()) > 0)
@@ -339,10 +411,16 @@ class TabVideo(QWidget):
             self.output_dir_edit.setText(dir_path)
 
     def _start_extraction(self):
-        video_paths = [
-            self.video_list_widget.item(i).data(Qt.UserRole)
-            for i in range(self.video_list_widget.count())
-        ]
+        video_paths = []
+        self._queued_video_roles = {}
+        for i in range(self.video_list_widget.count()):
+            item = self.video_list_widget.item(i)
+            path = item.data(Qt.UserRole)
+            w = self.video_list_widget.itemWidget(item)
+            role = w.get_role() if w else "train_val"
+            video_paths.append(path)
+            self._queued_video_roles[path] = role
+
         output_dir = self.output_dir_edit.text().strip()
 
         if not video_paths:
@@ -409,13 +487,22 @@ class TabVideo(QWidget):
         self.add_videos_btn.setEnabled(True)
         self._update_video_count()
 
+        # Register video & frame split roles in dataset_manager
+        if hasattr(self.dataset_manager, "register_video_frames"):
+            for v_path, role in self._queued_video_roles.items():
+                extracted_files = self.extractor.last_batch_results.get(v_path, [])
+                self.dataset_manager.register_video_frames(
+                    os.path.basename(v_path), role, extracted_files
+                )
+
         if success:
             self.progress_bar.setValue(100)
             self.status_label.setText(f"Selesai! {message}")
             QMessageBox.information(
                 self,
                 "Ekstraksi Selesai! 🎉",
-                f"{message}\n\nSilakan lanjut ke Menu 2 untuk kurasi dan anotasi objek."
+                f"{message}\n\nKategori video (Train & Val / Test Only) telah disimpan.\n"
+                f"Silakan lanjut ke Menu 2 untuk kurasi dan anotasi objek."
             )
             self.frames_extracted.emit(self.output_dir_edit.text().strip())
         else:

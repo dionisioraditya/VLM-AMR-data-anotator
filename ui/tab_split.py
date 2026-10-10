@@ -54,9 +54,16 @@ class TabSplit(QWidget):
         ctrl_layout.setContentsMargins(14, 12, 14, 12)
         ctrl_layout.setSpacing(10)
 
+        ctrl_header_row = QHBoxLayout()
         ctrl_title = QLabel("⚙️ Konfigurasi Proporsi Auto-Split:")
         ctrl_title.setStyleSheet("font-weight: 700; color: #38bdf8;")
-        ctrl_layout.addWidget(ctrl_title)
+        ctrl_header_row.addWidget(ctrl_title)
+
+        self.role_mode_label = QLabel("")
+        self.role_mode_label.setStyleSheet("color: #38bdf8; font-size: 11px; font-weight: 600;")
+        ctrl_header_row.addStretch()
+        ctrl_header_row.addWidget(self.role_mode_label)
+        ctrl_layout.addLayout(ctrl_header_row)
 
         ratios_row = QHBoxLayout()
         ratios_row.setSpacing(16)
@@ -89,14 +96,14 @@ class TabSplit(QWidget):
 
         # Test Ratio
         test_box = QHBoxLayout()
-        test_lbl = QLabel("🔵 Test:")
-        test_lbl.setStyleSheet("font-weight: 600; color: #38bdf8;")
+        self.test_lbl = QLabel("🔵 Test:")
+        self.test_lbl.setStyleSheet("font-weight: 600; color: #38bdf8;")
         self.test_spin = QSpinBox()
         self.test_spin.setRange(0, 100)
         self.test_spin.setValue(15)
         self.test_spin.setSuffix("%")
         self.test_spin.valueChanged.connect(self._on_ratio_changed)
-        test_box.addWidget(test_lbl)
+        test_box.addWidget(self.test_lbl)
         test_box.addWidget(self.test_spin)
         ratios_row.addLayout(test_box)
 
@@ -246,6 +253,47 @@ class TabSplit(QWidget):
         """Reload all splits and statistics from dataset_manager."""
         all_imgs = self.dataset_manager.get_image_list()
         splits = self.dataset_manager.get_splits()
+        role_counts = (
+            self.dataset_manager.get_role_counts()
+            if hasattr(self.dataset_manager, "get_role_counts")
+            else {"train_val": len(all_imgs), "test": 0}
+        )
+        test_role_cnt = role_counts.get("test", 0)
+        tv_role_cnt = role_counts.get("train_val", 0)
+
+        if test_role_cnt > 0:
+            self.role_mode_label.setText(
+                f"📌 Video Test Terpisah: {test_role_cnt} frame [Test Only] ➡️ 100% Test | "
+                f"{tv_role_cnt} frame [Train & Val] dibagi Train/Val"
+            )
+            if self.test_spin.isEnabled():
+                self.train_spin.blockSignals(True)
+                self.val_spin.blockSignals(True)
+                self.test_spin.blockSignals(True)
+                cur_val = self.val_spin.value()
+                self.test_spin.setValue(0)
+                self.test_spin.setEnabled(False)
+                self.test_spin.setToolTip("Dikunci otomatis karena Test Set diambil 100% dari video berkategori 'Test Only'.")
+                self.train_spin.setValue(max(0, 100 - cur_val))
+                self.train_spin.blockSignals(False)
+                self.val_spin.blockSignals(False)
+                self.test_spin.blockSignals(False)
+                self._on_ratio_changed()
+        else:
+            self.role_mode_label.setText("")
+            if not self.test_spin.isEnabled():
+                self.train_spin.blockSignals(True)
+                self.val_spin.blockSignals(True)
+                self.test_spin.blockSignals(True)
+                self.test_spin.setEnabled(True)
+                self.test_spin.setToolTip("")
+                self.train_spin.setValue(70)
+                self.val_spin.setValue(15)
+                self.test_spin.setValue(15)
+                self.train_spin.blockSignals(False)
+                self.val_spin.blockSignals(False)
+                self.test_spin.blockSignals(False)
+                self._on_ratio_changed()
 
         self.train_list.blockSignals(True)
         self.val_list.blockSignals(True)
@@ -265,16 +313,22 @@ class TabSplit(QWidget):
             for img in img_list:
                 anno = self.dataset_manager.get_annotation(img)
                 b_count = len(anno.get("boxes", []))
+                role = (
+                    self.dataset_manager.get_frame_role(img)
+                    if hasattr(self.dataset_manager, "get_frame_role")
+                    else "train_val"
+                )
+                role_tag = "[Test]" if role == "test" else "[T&V]"
                 if b_count > 0:
                     pos += 1
                     annotated_count += 1
                     icon = "🟢"
-                    text = f"{icon} [{b_count} box] {img}"
+                    text = f"{icon} {role_tag} [{b_count} box] {img}"
                 else:
                     neg += 1
                     negative_count += 1
                     icon = "⚪"
-                    text = f"{icon} [0 box] {img}"
+                    text = f"{icon} {role_tag} [0 box] {img}"
                 item = QListWidgetItem(text)
                 item.setData(Qt.UserRole, img)
                 target_widget.addItem(item)
@@ -313,7 +367,7 @@ class TabSplit(QWidget):
     def _run_auto_split(self):
         total = self.train_spin.value() + self.val_spin.value() + self.test_spin.value()
         if total != 100:
-            QMessageBox.warning(self, "Peringatan Rasio", "Total persentase Train, Validation, dan Test harus tepat 100%.")
+            QMessageBox.warning(self, "Peringatan Rasio", "Total persentase harus tepat 100%.")
             return
 
         r_tr = self.train_spin.value() / 100.0
@@ -321,7 +375,7 @@ class TabSplit(QWidget):
         r_te = self.test_spin.value() / 100.0
         stratify = self.stratify_check.isChecked()
 
-        self.dataset_manager.auto_split(
+        splits = self.dataset_manager.auto_split(
             train_ratio=r_tr,
             val_ratio=r_va,
             test_ratio=r_te,
@@ -329,7 +383,22 @@ class TabSplit(QWidget):
         )
         self.reload_data()
         self.dataset_updated.emit()
-        QMessageBox.information(self, "Auto-Split Sukses 🎉", "Pembagian dataset berhasil diperbarui!")
+
+        has_test_role = (
+            self.dataset_manager.has_test_only_frames()
+            if hasattr(self.dataset_manager, "has_test_only_frames")
+            else False
+        )
+        if has_test_role:
+            msg = (
+                f"Pembagian dataset berhasil diperbarui berdasarkan kategori video!\n\n"
+                f"• 🟢 Train Set: {len(splits.get('train', []))} frame (dari video Train & Val)\n"
+                f"• 🟡 Validation Set: {len(splits.get('val', []))} frame (dari video Train & Val)\n"
+                f"• 🔵 Test Set: {len(splits.get('test', []))} frame (100% dari video Test Only)"
+            )
+        else:
+            msg = "Pembagian dataset berhasil diperbarui!"
+        QMessageBox.information(self, "Auto-Split Sukses 🎉", msg)
 
     def _move_selected(self, source_split: str, target_split: str):
         src_widget = {"train": self.train_list, "val": self.val_list, "test": self.test_list}.get(source_split)
@@ -374,10 +443,17 @@ class TabSplit(QWidget):
         boxes = anno.get("boxes", [])
         prompts = anno.get("prompts", [])
         split_name = self.dataset_manager.get_split_for_image(img_name).upper()
+        role = (
+            self.dataset_manager.get_frame_role(img_name)
+            if hasattr(self.dataset_manager, "get_frame_role")
+            else "train_val"
+        )
+        role_display = "🔵 Test Only" if role == "test" else "🟢 Train & Val"
 
         info_lines = [
             f"<b>File:</b> {img_name}",
-            f"<b>Partisi:</b> {split_name}",
+            f"<b>Kategori Video:</b> {role_display}",
+            f"<b>Partisi Saat Ini:</b> {split_name}",
             f"<b>Jumlah Box:</b> {len(boxes)} {'(Negatif)' if not boxes else ''}",
             f"<b>Jumlah Prompt:</b> {len(prompts)}",
         ]

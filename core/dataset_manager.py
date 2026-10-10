@@ -79,6 +79,8 @@ class DatasetManager:
         }
         self.generator_settings: Dict[str, Any] = dict(self.DEFAULT_GENERATOR_SETTINGS)
         self.splits: Dict[str, List[str]] = {"train": [], "val": [], "test": []}
+        self.video_roles: Dict[str, str] = {}
+        self.frame_roles: Dict[str, str] = {}
         self.templates_dir: Optional[str] = None
 
         if project_dir:
@@ -204,9 +206,14 @@ class DatasetManager:
                         "val": list(loaded_splits.get("val", [])),
                         "test": list(loaded_splits.get("test", [])),
                     }
+                    # Load video and frame role mappings
+                    self.video_roles = dict(cfg.get("video_roles", {}))
+                    self.frame_roles = dict(cfg.get("frame_roles", {}))
             except Exception:
                 self.classes = list(self.DEFAULT_CLASSES)
                 self.splits = {"train": [], "val": [], "test": []}
+                self.video_roles = {}
+                self.frame_roles = {}
         else:
             self._save_config()
 
@@ -253,6 +260,8 @@ class DatasetManager:
             "class_synonyms": self.class_synonyms,
             "generator_settings": self.generator_settings,
             "splits": self.splits,
+            "video_roles": self.video_roles,
+            "frame_roles": self.frame_roles,
             "version": "1.0",
         }
         with open(self.config_path, "w", encoding="utf-8") as f:
@@ -267,6 +276,69 @@ class DatasetManager:
         self.generator_settings.update(settings)
         self._save_config()
 
+    # ---------------- Video & Frame Role Management ----------------
+    @staticmethod
+    def _normalize_role(role: str) -> str:
+        r = (role or "train_val").lower().strip()
+        if r in ("test", "test_only", "test only"):
+            return "test"
+        return "train_val"
+
+    def register_video_frames(self, video_name: str, role: str, frame_names: Optional[List[str]] = None):
+        """
+        Register the split category role ('train_val' or 'test') for a video source
+        and all frames extracted from it.
+        """
+        norm_role = self._normalize_role(role)
+        base_video = os.path.basename(video_name)
+        self.video_roles[base_video] = norm_role
+
+        if frame_names:
+            for fname in frame_names:
+                self.frame_roles[fname] = norm_role
+                if norm_role == "test":
+                    for s in ("train", "val"):
+                        if fname in self.splits.get(s, []):
+                            self.splits[s].remove(fname)
+                    if fname not in self.splits.get("test", []):
+                        self.splits.setdefault("test", []).append(fname)
+
+        self._save_config()
+
+    def get_frame_role(self, image_name: str) -> str:
+        """
+        Return the designated category role for a frame ('train_val' or 'test').
+        Checks explicit frame_roles first, then matches against registered video_roles prefixes.
+        """
+        if image_name in self.frame_roles:
+            return self._normalize_role(self.frame_roles[image_name])
+
+        img_lower = image_name.lower()
+        for v_name, role in self.video_roles.items():
+            v_stem = os.path.splitext(os.path.basename(v_name))[0]
+            safe_name = "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in v_stem).strip("_")
+            if safe_name and safe_name.lower() in img_lower:
+                return self._normalize_role(role)
+
+        return "train_val"
+
+    def set_frame_role(self, image_name: str, role: str):
+        """Explicitly set the category role ('train_val' or 'test') for a single frame."""
+        self.frame_roles[image_name] = self._normalize_role(role)
+        self._save_config()
+
+    def get_role_counts(self) -> Dict[str, int]:
+        """Return counts of 'train_val' and 'test' role frames in the active image list."""
+        counts = {"train_val": 0, "test": 0}
+        for img in self.get_image_list():
+            r = self.get_frame_role(img)
+            counts[r] = counts.get(r, 0) + 1
+        return counts
+
+    def has_test_only_frames(self) -> bool:
+        """Return True if at least one frame in the project is designated as 'test' role."""
+        return self.get_role_counts().get("test", 0) > 0
+
     # ---------------- Dataset Split Management (Train, Val, Test) ----------------
     def get_splits(self) -> Dict[str, List[str]]:
         """Return synchronized splits mapping of split -> image list."""
@@ -279,7 +351,11 @@ class DatasetManager:
 
         assigned = set(train_set) | set(val_set) | set(test_set)
         unassigned = [img for img in all_imgs if img not in assigned]
-        train_set.extend(unassigned)
+        for img in unassigned:
+            if self.get_frame_role(img) == "test":
+                test_set.append(img)
+            else:
+                train_set.append(img)
 
         self.splits = {
             "train": train_set,
@@ -309,7 +385,7 @@ class DatasetManager:
         for s_name in ("train", "val", "test"):
             if image_name in splits[s_name]:
                 return s_name
-        return "train"
+        return "test" if self.get_frame_role(image_name) == "test" else "train"
 
     def move_image_to_split(self, image_name: str, target_split: str) -> bool:
         """Move an image to target_split."""
@@ -335,7 +411,11 @@ class DatasetManager:
     ) -> Dict[str, List[str]]:
         """
         Automatically split all project images into train, val, and test.
-        If stratify is True, balances frames with bounding boxes vs empty/negative frames.
+        - If any frames have role == 'test' (from 'Test Only' videos), 100% of those frames
+          are assigned to 'test', while 'train_val' frames are split solely between 'train' and 'val'
+          using the relative ratio of train_ratio : val_ratio.
+        - Otherwise (when all frames are 'train_val'), performs standard 3-way split.
+        - If stratify is True, balances frames with bounding boxes vs empty/negative frames.
         """
         if "train_pct" in kwargs:
             val_p = kwargs.get("train_pct", 70)
@@ -354,41 +434,75 @@ class DatasetManager:
             self._save_config()
             return self.splits
 
-        total_r = train_ratio + val_ratio + test_ratio
-        if total_r <= 0:
-            train_ratio, val_ratio, test_ratio = 0.70, 0.15, 0.15
-            total_r = 1.0
-
-        r_train = train_ratio / total_r
-        r_val = val_ratio / total_r
-
         import random
         rng = random.Random(seed)
 
-        def partition(items: List[str]) -> Tuple[List[str], List[str], List[str]]:
-            shuffled = list(items)
-            rng.shuffle(shuffled)
-            n = len(shuffled)
-            n_tr = int(round(n * r_train))
-            n_va = int(round(n * r_val))
-            # Ensure within bounds
-            n_tr = min(n, max(0, n_tr))
-            n_va = min(n - n_tr, max(0, n_va))
-            tr = shuffled[:n_tr]
-            va = shuffled[n_tr:n_tr + n_va]
-            te = shuffled[n_tr + n_va:]
-            return tr, va, te
+        test_only_imgs = [img for img in all_imgs if self.get_frame_role(img) == "test"]
+        train_val_imgs = [img for img in all_imgs if self.get_frame_role(img) != "test"]
 
-        if stratify:
-            pos_imgs = [img for img in all_imgs if self.is_annotated(img)]
-            neg_imgs = [img for img in all_imgs if not self.is_annotated(img)]
-            p_tr, p_va, p_te = partition(pos_imgs)
-            n_tr, n_va, n_te = partition(neg_imgs)
-            new_train = p_tr + n_tr
-            new_val = p_va + n_va
-            new_test = p_te + n_te
+        if test_only_imgs:
+            # Dedicated Test video mode:
+            # 100% of test_only_imgs -> test set
+            # train_val_imgs -> split between train and val only
+            tv_total = train_ratio + val_ratio
+            if tv_total <= 0:
+                r_train_tv = 0.80
+            else:
+                r_train_tv = train_ratio / tv_total
+
+            def partition_two_way(items: List[str]) -> Tuple[List[str], List[str]]:
+                shuffled = list(items)
+                rng.shuffle(shuffled)
+                n = len(shuffled)
+                n_tr = int(round(n * r_train_tv))
+                n_tr = min(n, max(0, n_tr))
+                return shuffled[:n_tr], shuffled[n_tr:]
+
+            if stratify:
+                pos_tv = [img for img in train_val_imgs if self.is_annotated(img)]
+                neg_tv = [img for img in train_val_imgs if not self.is_annotated(img)]
+                p_tr, p_va = partition_two_way(pos_tv)
+                n_tr, n_va = partition_two_way(neg_tv)
+                new_train = p_tr + n_tr
+                new_val = p_va + n_va
+            else:
+                new_train, new_val = partition_two_way(train_val_imgs)
+
+            new_test = list(test_only_imgs)
         else:
-            new_train, new_val, new_test = partition(all_imgs)
+            # Standard 3-way split across all frames
+            total_r = train_ratio + val_ratio + test_ratio
+            if total_r <= 0:
+                train_ratio, val_ratio, test_ratio = 0.70, 0.15, 0.15
+                total_r = 1.0
+
+            r_train = train_ratio / total_r
+            r_val = val_ratio / total_r
+
+            def partition(items: List[str]) -> Tuple[List[str], List[str], List[str]]:
+                shuffled = list(items)
+                rng.shuffle(shuffled)
+                n = len(shuffled)
+                n_tr = int(round(n * r_train))
+                n_va = int(round(n * r_val))
+                # Ensure within bounds
+                n_tr = min(n, max(0, n_tr))
+                n_va = min(n - n_tr, max(0, n_va))
+                tr = shuffled[:n_tr]
+                va = shuffled[n_tr:n_tr + n_va]
+                te = shuffled[n_tr + n_va:]
+                return tr, va, te
+
+            if stratify:
+                pos_imgs = [img for img in all_imgs if self.is_annotated(img)]
+                neg_imgs = [img for img in all_imgs if not self.is_annotated(img)]
+                p_tr, p_va, p_te = partition(pos_imgs)
+                n_tr, n_va, n_te = partition(neg_imgs)
+                new_train = p_tr + n_tr
+                new_val = p_va + n_va
+                new_test = p_te + n_te
+            else:
+                new_train, new_val, new_test = partition(all_imgs)
 
         self.splits = {
             "train": new_train,
@@ -585,10 +699,11 @@ class DatasetManager:
             except Exception:
                 pass
 
-        # Remove from splits
+        # Remove from splits and frame_roles
         for s in ("train", "val", "test"):
             if image_name in self.splits.get(s, []):
                 self.splits[s].remove(image_name)
+        self.frame_roles.pop(image_name, None)
         self._save_config()
 
         return success

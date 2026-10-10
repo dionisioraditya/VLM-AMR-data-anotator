@@ -665,5 +665,64 @@ class TestCoreModules(unittest.TestCase):
         self.assertEqual(va_imgs, set(val_names))
         self.assertEqual(te_imgs, set(test_names))
 
+    def test_video_role_based_auto_split(self):
+        """Test that 'Train & Val' videos split only into train/val, while 'Test Only' videos go 100% into test."""
+        from PIL import Image
+        dm = DatasetManager(self.test_dir)
+
+        luar_frames = []
+        for i in range(1, 11):
+            fname = f"amr_frame_video_luar_{i:05d}.jpg"
+            Image.new("RGB", (100, 100), color="green").save(os.path.join(dm.frames_dir, fname))
+            if i <= 6:
+                dm.save_annotation(fname, {
+                    "image_file": fname,
+                    "width": 100,
+                    "height": 100,
+                    "boxes": [{"id": f"b_{i}", "label": "pallet", "box_2d": [100, 100, 300, 300]}],
+                    "prompts": []
+                })
+            luar_frames.append(fname)
+
+        lab_frames = []
+        for i in range(1, 6):
+            fname = f"amr_frame_video_lab_{i:05d}.jpg"
+            Image.new("RGB", (100, 100), color="blue").save(os.path.join(dm.frames_dir, fname))
+            dm.save_annotation(fname, {
+                "image_file": fname,
+                "width": 100,
+                "height": 100,
+                "boxes": [{"id": f"lab_{i}", "label": "human", "box_2d": [200, 200, 400, 400]}],
+                "prompts": []
+            })
+            lab_frames.append(fname)
+
+        dm.register_video_frames("video_luar.mp4", "train_val", luar_frames)
+        dm.register_video_frames("video_lab.mp4", "test", lab_frames)
+
+        self.assertTrue(dm.has_test_only_frames())
+        counts = dm.get_role_counts()
+        self.assertEqual(counts["train_val"], 10)
+        self.assertEqual(counts["test"], 5)
+
+        # Run auto-split (e.g. 80% Train, 20% Val, 0% Test spinbox)
+        splits = dm.auto_split(train_ratio=0.80, val_ratio=0.20, test_ratio=0.0, stratify=True, seed=42)
+
+        # Verify 100% of lab frames are in test and 0% in train/val
+        self.assertEqual(set(splits["test"]), set(lab_frames))
+        self.assertEqual(len(set(splits["train"]).intersection(set(lab_frames))), 0)
+        self.assertEqual(len(set(splits["val"]).intersection(set(lab_frames))), 0)
+
+        # Verify 100% of luar frames are partitioned between train and val (8 train, 2 val)
+        self.assertEqual(set(splits["train"]) | set(splits["val"]), set(luar_frames))
+        self.assertEqual(len(splits["train"]), 8)
+        self.assertEqual(len(splits["val"]), 2)
+
+        # Verify persistence across reload
+        dm2 = DatasetManager(self.test_dir)
+        self.assertEqual(dm2.get_frame_role(lab_frames[0]), "test")
+        self.assertEqual(dm2.get_frame_role(luar_frames[0]), "train_val")
+
+
 if __name__ == "__main__":
     unittest.main()

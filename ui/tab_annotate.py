@@ -915,6 +915,16 @@ class TabAnnotate(QWidget):
         self._filter_images(self.search_edit.text(), select_row=select_row)
         self._update_stats()
 
+    def _format_frame_item_text(self, img: str, is_ann: bool) -> str:
+        icon_prefix = "🟢" if is_ann else "⚪"
+        role = (
+            self.dataset_manager.get_frame_role(img)
+            if hasattr(self.dataset_manager, "get_frame_role")
+            else "train_val"
+        )
+        role_tag = "[Test]" if role == "test" else "[T&V]"
+        return f"{icon_prefix} {role_tag} {img}"
+
     def _filter_images(self, query="", select_row: int = -1):
         q = query.strip().lower()
         self.image_list_widget.blockSignals(True)
@@ -923,8 +933,7 @@ class TabAnnotate(QWidget):
         for img in self.images_list:
             if not q or q in img.lower():
                 is_ann = self.dataset_manager.is_annotated(img)
-                icon_prefix = "🟢" if is_ann else "⚪"
-                item = QListWidgetItem(f"{icon_prefix} {img}")
+                item = QListWidgetItem(self._format_frame_item_text(img, is_ann))
                 item.setData(Qt.UserRole, img)
                 self.image_list_widget.addItem(item)
 
@@ -967,7 +976,13 @@ class TabAnnotate(QWidget):
 
         self.canvas.load_image(img_path, boxes)
         self._refresh_box_list_ui()
-        self.canvas_status.setText(f"Frame: {img_name} ({len(boxes)} objek teranotasi)")
+        role = (
+            self.dataset_manager.get_frame_role(img_name)
+            if hasattr(self.dataset_manager, "get_frame_role")
+            else "train_val"
+        )
+        role_str = "🔵 Test Only" if role == "test" else "🟢 Train & Val"
+        self.canvas_status.setText(f"Frame: {img_name} [{role_str}] ({len(boxes)} objek teranotasi)")
 
     def _prev_image(self):
         curr = self.image_list_widget.currentRow()
@@ -1069,8 +1084,7 @@ class TabAnnotate(QWidget):
             item = self.image_list_widget.item(idx)
             if item and item.data(Qt.UserRole) == self.current_image_name:
                 is_ann = len(self.canvas.boxes) > 0
-                icon_prefix = "🟢" if is_ann else "⚪"
-                item.setText(f"{icon_prefix} {self.current_image_name}")
+                item.setText(self._format_frame_item_text(self.current_image_name, is_ann))
                 break
 
     def _refresh_box_list_ui(self):

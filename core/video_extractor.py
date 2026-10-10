@@ -7,6 +7,8 @@ class VideoExtractor:
 
     def __init__(self):
         self._is_cancelled = False
+        self.last_extracted_files: list[str] = []
+        self.last_batch_results: dict[str, list[str]] = {}
 
     def cancel(self):
         """Cancel ongoing extraction."""
@@ -40,6 +42,7 @@ class VideoExtractor:
             Tuple of (success, message, total_saved_count).
         """
         self._is_cancelled = False
+        self.last_extracted_files = []
 
         if not os.path.isfile(video_path):
             return False, f"File video tidak ditemukan: {video_path}", 0
@@ -88,6 +91,7 @@ class VideoExtractor:
                     filename = f"{prefix}_{saved_count:05d}.jpg"
                     out_path = os.path.join(output_dir, filename)
                     cv2.imwrite(out_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    self.last_extracted_files.append(filename)
 
                 current_frame_idx += 1
 
@@ -134,6 +138,7 @@ class VideoExtractor:
             Tuple of (success, message, total_saved_count).
         """
         self._is_cancelled = False
+        self.last_batch_results = {}
 
         if not video_paths:
             return False, "Tidak ada file video yang dipilih.", 0
@@ -179,6 +184,7 @@ class VideoExtractor:
                 progress_callback=single_progress,
             )
 
+            self.last_batch_results[v_path] = list(self.last_extracted_files)
             total_saved_count += saved
             if ok:
                 success_videos += 1
